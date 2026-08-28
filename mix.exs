@@ -24,6 +24,10 @@ defmodule LiveDJ.MixProject do
       # binary PCM frames, which Channels would only wrap in a JSON envelope.
       {:bandit, "~> 1.12"},
       {:plug, "~> 1.18"},
+      # The WebSocket CLIENT. Already in the tree via gemini_ex, but LiveDJ.Provider.Grok
+      # uses it directly — there is no Elixir package for the OpenAI Realtime protocol
+      # xAI speaks, so that transport is hand-rolled.
+      {:websockex, "~> 0.4"},
       {:websock_adapter, "~> 0.5"},
 
       # Gemini Live API — Gemini.Live.Session is a GenServer over the Bidi WebSocket.
