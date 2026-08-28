@@ -33,15 +33,15 @@ else
   end
 end
 
-# SOCKET_HANDLER=minimal runs the ~30-line primitive instead of the full DJ.
-socket_handler =
-  case System.get_env("SOCKET_HANDLER") do
-    "minimal" -> LiveDJ.Minimal
-    _ -> LiveDJ.Socket
+# PORT wins, then whatever config/{env}.exs set — same fallback the two above use.
+# Hardcoding 8000 here made config/test.exs unable to move the port at all.
+port =
+  case System.get_env("PORT") do
+    nil -> Application.get_env(:live_dj, :port)
+    value -> String.to_integer(value)
   end
 
 config :live_dj,
-  socket_handler: socket_handler,
   model: System.get_env("LIVE_MODEL") || Application.get_env(:live_dj, :model),
   voice: System.get_env("LIVE_VOICE") || Application.get_env(:live_dj, :voice),
-  port: String.to_integer(System.get_env("PORT") || "8000")
+  port: port
