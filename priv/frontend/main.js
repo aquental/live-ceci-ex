@@ -6,7 +6,9 @@ const $ = (id) => document.getElementById(id);
 const orb = $("orb"), statusEl = $("status"), nowEl = $("nowplaying"), txEl = $("transcript");
 const music = $("music");
 
-const BARGE_RMS = 0.02;
+// Measured: room noise crossed the old 0.02 gate at 0.021-0.023 and cut Mira off mid
+// word; a deliberate interruption read 0.054. 0.04 sits between them.
+const BARGE_RMS = 0.04;
 let ws, audioCtx, workletNode, micStream;
 let nextStart = 0;
 let activeSources = [];
@@ -18,11 +20,17 @@ let qi = 0;
 
 function setOrb(state) { orb.className = "orb " + state; }       // idle | listening | thinking | speaking
 function setStatus(t) { statusEl.textContent = t; }
+// The transcript pane shows ~4 lines and scrolls. Nothing ever read the older ones,
+// but every line stayed in the DOM for the life of the session — and a long chat with
+// Mira is thousands of turns. Keep a scrollback, drop the rest.
+const MAX_LINES = 60;
 function addLine(role, text) {
   const p = document.createElement("div");
   p.className = "line " + role;
   p.textContent = (role === "mira" ? "mira  " : "you  ") + text;
-  txEl.appendChild(p); txEl.scrollTop = txEl.scrollHeight;
+  txEl.appendChild(p);
+  while (txEl.childElementCount > MAX_LINES) txEl.removeChild(txEl.firstElementChild);
+  txEl.scrollTop = txEl.scrollHeight;
 }
 
 // ---------- music player (driven by Mira's tool calls) ----------
@@ -76,7 +84,13 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { setStatus("listening…"); setOrb("listening"); };
-  ws.onclose = () => { setStatus("the line dropped — tap to reconnect"); setOrb("idle"); };
+  ws.onclose = () => {
+    setStatus("the line dropped — tap to reconnect");
+    setOrb("idle");
+    stopVoice();                                                          // drop whatever was still queued
+    $("talk").disabled = false;                                           // ...the status line said this all along
+    $("talk").textContent = "↻ reconnect";
+  };
   ws.onmessage = (evt) => {
     if (typeof evt.data !== "string") { playVoice(evt.data); return; }     // binary = voice
     const m = JSON.parse(evt.data);
@@ -100,7 +114,7 @@ async function startMic() {
   workletNode.port.onmessage = (e) => {
     // pcm arrives in ~100 ms batches; rms-only messages come between them for barge-in
     if (e.data.pcm && ws && ws.readyState === WebSocket.OPEN) ws.send(e.data.pcm);
-    if (e.data.rms >= BARGE_RMS && speaking) stopVoice();                  // client-side barge-in
+    if (e.data.barge && speaking) stopVoice();                             // client-side barge-in
   };
   source.connect(workletNode);
   workletNode.connect(audioCtx.destination);                              // keeps the graph alive (silent)
@@ -109,8 +123,11 @@ async function startMic() {
 async function go() {
   $("talk").disabled = true;
   setStatus("waking mira up…"); setOrb("thinking");
-  await loadTracks();
-  await startMic();
+  // Both guards make this re-entrant. A dropped socket leaves the mic, the AudioContext
+  // and the worklet perfectly alive — only the socket needs rebuilding — and running
+  // startMic twice would strand the old graph and re-prompt for the microphone.
+  if (!tracks.length) await loadTracks();
+  if (!audioCtx) await startMic();
   connect();
   $("talk").textContent = "● live";
 }

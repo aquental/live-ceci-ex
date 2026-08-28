@@ -5,9 +5,14 @@
 // quantum meant 375 WebSocket frames/sec of ~85 bytes, where framing and TLS overhead
 // dwarfed the audio itself — and each one cost a GenServer call on the server.
 //
-// Barge-in cannot wait for that batch: a quantum whose level crosses the gate posts an
-// RMS-only message immediately, so cutting her off stays as responsive as it was.
+// Barge-in cannot wait for that batch, so it posts its own message the moment speech
+// starts. It fires on the RISING EDGE only: while the level stays up, the utterance is
+// already known to be in progress and repeating the message just kills the voice frames
+// that arrived since. HOLD_QUANTA rejects single-sample spikes, and releasing at a lower
+// level than it triggers stops it chattering around the threshold.
 const FRAME_SAMPLES = 1600; // 100 ms at 16 kHz
+const HOLD_QUANTA = 3;      // ~8 ms at 48 kHz — below this it is a click, not a word
+const RELEASE_RATIO = 0.6;  // hysteresis: fall this far before the gate can re-arm
 
 class PCMProcessor extends AudioWorkletProcessor {
   constructor(options) {
@@ -16,7 +21,8 @@ class PCMProcessor extends AudioWorkletProcessor {
     this._frac = 0;
     this._buf = new Int16Array(FRAME_SAMPLES);
     this._len = 0;
-    this._peak = 0;                  // loudest quantum in the batch, not an average of averages
+    this._above = 0;                 // consecutive quanta over the gate
+    this._open = false;              // true once this utterance has already been reported
     this._bargeRms = (options && options.processorOptions && options.processorOptions.bargeRms) || 0.02;
   }
   process(inputs) {
@@ -40,21 +46,30 @@ class PCMProcessor extends AudioWorkletProcessor {
       sum += s * s;
     }
     const rms = out.length ? Math.sqrt(sum / out.length) : 0;
-    if (rms > this._peak) this._peak = rms;
 
     for (let i = 0; i < out.length; i++) {
       this._buf[this._len++] = out[i] < 0 ? out[i] * 0x8000 : out[i] * 0x7fff;
       if (this._len === FRAME_SAMPLES) this._flush();
     }
 
-    if (rms >= this._bargeRms) this.port.postMessage({ rms });   // barge-in fast path
+    if (rms >= this._bargeRms) {
+      this._above++;
+      if (this._above === HOLD_QUANTA && !this._open) {
+        this._open = true;
+        this.port.postMessage({ barge: true, rms });              // once per utterance
+      }
+    } else if (rms < this._bargeRms * RELEASE_RATIO) {
+      this._above = 0;
+      this._open = false;
+    }
     return true;
   }
   _flush() {
     const frame = this._buf.slice(0, this._len);   // copy: _buf is reused across batches
-    this.port.postMessage({ pcm: frame.buffer, rms: this._peak }, [frame.buffer]);
+    // No rms here any more. It used to carry the batch PEAK, which crossed the gate far
+    // more readily than an instantaneous reading and made barge-in fire on room noise.
+    this.port.postMessage({ pcm: frame.buffer }, [frame.buffer]);
     this._len = 0;
-    this._peak = 0;
   }
 }
 registerProcessor("pcm-processor", PCMProcessor);
