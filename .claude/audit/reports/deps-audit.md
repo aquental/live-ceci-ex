@@ -1,164 +1,133 @@
-# Dependency Audit — live-dj-ex
+# Dependency Audit — live_dj
 
-Date: 2026-08-28 · Elixir 1.20.3 / OTP 29 · 5 direct deps, 22 total in lock
+Date: 2026-08-28 · Elixir 1.20.3 / OTP 29 (erts 17.0.5) · 6 direct deps, 24 total
 
 ## Clean areas (one line each)
 
-- **Freshness:** all 5 direct deps are at the newest published stable version (`mix hex.outdated`: 5/5 Up-to-date). Nothing is behind; no constraint edit is needed for any upgrade.
-- **Retirement/advisories:** no direct or transitive dep is retired. (`mix hex.audit` clean; hex.pm retirement maps checked per-package — bandit 1.10.0 and plug 1.20.0/1.20.1/1.13.x are retired upstream, but the lock sits on bandit 1.12.5 and plug 1.20.3, clear of all of them.)
-- **Unused deps:** none. All 5 are directly referenced in `lib/`; `mix deps.unlock --check-unused` is clean.
-- **Maintenance:** bandit, plug, jason, req, telemetry, jose all released within the last ~4 months by active maintainers.
+- **Vulnerabilities**: `mix deps.audit` → "No vulnerabilities found." `mix hex.audit` → "No retired or security advisory packages found."
+- **Outdated**: `mix hex.outdated` reports all 6 direct deps **Up-to-date** (bandit 1.12.5, gemini_ex 0.17.0, jason 1.4.5, mix_audit 2.1.5, plug 1.20.3, websock_adapter 0.6.0). Nothing is behind.
+- **Unused deps**: none. All six are referenced (`Bandit` in `application.ex`, `Plug.Router`/`Plug.Static` in `router.ex`, `WebSockAdapter.upgrade/4` in `router.ex`, `Gemini.*` in `socket.ex`/`live_session.ex`/`tools.ex`/`runtime.exs`, `Jason` in `socket.ex`, `mix_audit` as a mix task). `mix deps.unlock --check-unused` is clean — no stale lock entries.
+- **Env/runtime settings**: `mix_audit` `only: [:dev, :test], runtime: false` is correct (mix-task-only, never called from `lib/`). All other deps are runtime deps used in the supervision tree or hot path — no wrong flags.
+- **gemini_ex private-API coupling**: **verified — it still holds** on the vendored 0.17.0 source (details below).
+- **Build**: `mix compile --warnings-as-errors --force` and `mix test` (49 tests) both pass on the installed 1.20.3/OTP 29.
 
-Everything below is an actual finding.
+## Item 5 — gemini_ex coupling verification (result: holds, no upgrade pending)
 
----
+Verified against `deps/gemini_ex/lib/gemini/live/session.ex` @ 0.17.0:
 
-## HIGH — `{:gemini_ex, "~> 0.17"}` is under-constrained for a 0.x core dependency
+- Public API, line 238: `def send_realtime_input(session, opts) do GenServer.call(session, {:send_realtime_input, opts}) end` — **arity 2, no timeout argument**, default 5 000 ms `GenServer.call` timeout. Confirmed at runtime: `Gemini.Live.Session.__info__(:functions)` exports `send_realtime_input: 2` only (no `/3`).
+- Internal message, line 448: `def handle_call({:send_realtime_input, opts}, _from, %{status: :ready} = state)` with a fallback clause at line 461 returning `{:error, {:not_ready, status}}`. The shape `{:send_realtime_input, opts}` sent by `lib/live_dj/live_session.ex:33` **matches exactly**, and `opts` is a keyword list, so `[audio: blob]` is correct.
+- `Gemini.Live.Audio.create_input_blob/2` (`deps/gemini_ex/lib/gemini/live/audio.ex:115`) is public, returns `%{data: pcm, mime_type: "audio/pcm;rate=16000"}` un-encoded by default — matches the assertion in `test/live_dj/live_session_test.exs`.
+- No timeout escape hatch exists anywhere in the module: `send_client_content/3` and `send_text/3` also take an `opts` that is *message* options, not a call timeout (lines 192, 204). So there is still no public way to get the sub-second timeout the app needs.
+- **Upgrade impact: none available.** 0.17.0 is the newest release on hex (released 2026-08-21); the lock is already at it. Nothing to assess yet.
 
-`~> 0.17` resolves to `>= 0.17.0 and < 1.0.0`. It is **not** `< 0.18.0`. Verified:
-
-```
-~> 0.17 vs 0.18.0 => true
-~> 0.17 vs 0.99.0 => true
-~> 0.17.0 vs 0.18.0 => false
-```
-
-Why this matters here specifically:
-
-- gemini_ex is the load-bearing dep. `lib/live_dj/socket.ex`, `lib/live_dj/minimal.ex` and `lib/live_dj/gotcha.ex` pattern-match `%Gemini.Types.Live.ServerMessage{server_content: %Gemini.Types.Live.ServerContent{}}` and `%ToolCall{}` **directly in function heads**, and pass the five-callback keyword contract (`on_message`/`on_transcription`/`on_error`/`on_close`/`on_tool_call`) to `Gemini.Live.Session.start_link/1`. A renamed struct field is a `FunctionClauseError` at runtime, not a compile error.
-- Release cadence is fast and the churn is in exactly the wrong place. From hex.pm: 0.11.0 (2026-03-05) → 0.17.0 (2026-08-21) — **7 minor releases in ~5.5 months**, roughly one every 3 weeks.
-- The project's own changelog proves 0.x minors carry breaking internals: **0.16.0 "Replaced the Gun/Cowlib Live WebSocket stack with WebSockex"** — a full transport rewrite of the Live path this app depends on, shipped as a minor.
-- Low adoption (13.2k all-time downloads, ~300/week) and a single-maintainer repo (`nshkrdotcom/gemini_ex`) mean breakage will not be caught by community pressure before you hit it.
-
-`mix.lock` currently protects you. But `mix deps.update gemini_ex`, a fresh clone with a stale/absent lock, or any transitive re-resolution silently jumps up to 0.99.
-
-**Fix** — pin to the minor in `mix.exs:34`:
-
-```diff
--      {:gemini_ex, "~> 0.17"},
-+      # 0.x: minors carry breaking changes (0.16.0 rewrote the Live WebSocket
-+      # transport). socket.ex pattern-matches Gemini.Types.Live.* struct shapes,
-+      # so a minor bump is a runtime FunctionClauseError, not a compile error.
-+      {:gemini_ex, "~> 0.17.0"},
-```
-
-`~> 0.17.0` == `>= 0.17.0 and < 0.18.0`. Upgrades then become a deliberate edit + changelog read, which is the correct ceremony for this dep.
+Verdict: the pin's rationale and the code are consistent. The issue below is about how that coupling is *defended*, not about whether it currently works.
 
 ---
 
-## MEDIUM — no CVE scanning in the project
+## Issues
 
-`mix hex.audit` only checks **Hex retirement flags** — a maintainer opt-in signal. It does not consult any CVE/advisory database. `mix deps.audit` is unavailable because `mix_audit` is not a dependency, so this repo currently has **zero** coverage against published Elixir security advisories, including transitively (jose, mint, plug_crypto, joken all sit in the graph and all have advisory history in the ecosystem).
+### P2 — Nothing in the test suite would catch a gemini_ex upgrade that breaks the private-message coupling
 
-This is cheap to close and is the one piece of tooling worth adding unconditionally.
+`test/live_dj/live_session_test.exs` exercises `LiveDJ.LiveSession.send_audio/3` against a local `StubSession` GenServer that is hand-written to answer `{:send_realtime_input, opts}`. The stub *is* the contract — it will keep passing forever regardless of what the real `Gemini.Live.Session` does. `lib/live_dj/socket.ex` never calls the real session in tests either (it goes through `LiveDJ.LiveSession`).
 
-**Fix** — `mix.exs`:
+Consequence: `~> 0.17.0` permits a 0.17.1 patch. If that patch renames the message, converts it to a cast, or routes through a Registry, `mix compile` stays clean (it is a bare `GenServer.call`, not a function call — nothing to warn about), all 49 tests stay green, and the failure surfaces only as a runtime `{:error, {:exit, {:timeout, ...}}}` per mic frame in production: silent dead air, exactly the failure mode `LiveDJ.LiveSession` was written to survive. The wrapper's own resilience hides the breakage.
 
-```diff
-       {:gemini_ex, "~> 0.17.0"},
--      {:jason, "~> 1.4"}
-+      {:jason, "~> 1.4"},
-+
-+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
-     ]
-```
-
-```
-mix deps.get && mix deps.audit
-```
-
----
-
-## LOW — `{:websock_adapter, "~> 0.5"}` already drifted a minor; declaration no longer matches reality
-
-**Confirmed: the reading is correct.** `~> 0.5` == `>= 0.5.0 and < 1.0.0`, verified:
-
-```
-~> 0.5 vs 0.6.0 => true    ~> 0.5 vs 0.9.9 => true    ~> 0.5 vs 1.0.0 => false
-```
-
-So 0.6.0 in the lock is permitted, and this is a *real* silent 0.x minor crossing — the 0.5 line ran from 2023-06 to 2025-11 (0.5.9) and 0.6.0 landed 2026-04-15. `mix.exs` says "0.5" while the app has only ever been built and tested against 0.6.0.
-
-**Is it a real risk in this case? Assessed: no actual breakage, but only by luck.** The entire 0.6.0 changelog is one entry:
-
-> Change default `max_frame_size` to be 10MB (was `:infinity`)
-
-That is a genuine behavior break for a binary-PCM app — a default frame cap appearing where there was none would truncate audio uploads. This project is immune purely because `lib/live_dj/router.ex:27` passes the option explicitly:
+Action — add a canary assertion to `test/live_dj/live_session_test.exs` that touches the *real* module, so an upgrade fails CI instead of the mic:
 
 ```elixir
-|> WebSockAdapter.upgrade(handler, [], timeout: 60_000, max_frame_size: 1_000_000)
+test "gemini_ex still lacks a public timeout, so the private call is still required" do
+  Code.ensure_loaded!(Gemini.Live.Session)
+  # If an arity-3 send_realtime_input appears, upstream may have added a timeout —
+  # re-check and drop the private-message hack in LiveDJ.LiveSession.
+  assert function_exported?(Gemini.Live.Session, :send_realtime_input, 2)
+  refute function_exported?(Gemini.Live.Session, :send_realtime_input, 3)
+
+  # The handle_call clause LiveDJ.LiveSession sends to must still exist.
+  source = File.read!("deps/gemini_ex/lib/gemini/live/session.ex")
+  assert source =~ "handle_call({:send_realtime_input, opts}"
+end
 ```
 
-The risk that remains is forward-looking: `~> 0.5` still authorizes 0.7, 0.8, 0.9 sight-unseen. websock_adapter is a Phoenix-team package on a slow, conservative cadence (7 releases in 3 years), so the probability is low — hence LOW, not HIGH. But the constraint should state what is actually supported.
+The source-grep half is deliberately brittle: that is the point — it is the only mechanical check available for a message shape that is not part of any exported function. Pair it with the existing comment in `mix.exs`.
 
-**Fix — recommended: tighten to `~> 0.6`** (`mix.exs:31`):
+### P3 — `websock` is used directly but declared only transitively
 
-```diff
--      {:websock_adapter, "~> 0.5"},
-+      {:websock_adapter, "~> 0.6"},
+`lib/live_dj/socket.ex:34` declares `@behaviour WebSock` and uses `@impl WebSock` five times (lines 41, 90, 114, 155). `websock` (0.5.3) is nowhere in `mix.exs` — it arrives through `bandit` (`websock ~> 0.5`) and `websock_adapter` (`websock ~> 0.5`). The app compiles today only because both parents happen to require it.
+
+This is the classic "missing direct dep": the version of the behaviour the socket implements is decided by someone else's requirement, and a resolution change (or swapping the adapter) silently changes or removes it.
+
+Action — add to `mix.exs` deps, next to `websock_adapter`:
+
+```elixir
+{:websock, "~> 0.5"},
 ```
 
-`~> 0.6` (`>= 0.6.0, < 1.0.0`) is the right call over `~> 0.6.0` here — it is a thin, stable adapter with a trivial public surface (one `upgrade/4` call), not a deep API dependency like gemini_ex. The value is documentary: it stops mix.exs from claiming support for a 0.5 line that is no longer exercised, and forces a re-read at the next minor. Use `~> 0.6.0` instead only if you want every websock_adapter minor to be a deliberate decision.
+No lock change results (0.5.3 already resolved); it only makes the dependency explicit and version-controlled.
+
+### P3 — `websock_adapter` constraint is looser than the project's own stated policy
+
+`{:websock_adapter, "~> 0.5"}` resolves to **0.6.0** — the lock already crossed a pre-1.0 minor boundary, where breaking changes are permitted by convention. `~> 0.5` will keep accepting 0.7, 0.8 … up to 1.0.
+
+`mix.exs` argues at length (correctly) that `~> 0.17` would be wrong for gemini_ex because a 0.x minor bump is a breaking-change slot, yet applies exactly that pattern to `websock_adapter`, whose `WebSockAdapter.upgrade/4` call in `router.ex:26` is the single entry point for every browser connection.
+
+Action — tighten to match what is actually locked and tested:
+
+```elixir
+{:websock_adapter, "~> 0.6"},
+```
+
+### P3 — `~> 0.17.0` still admits patch releases that can change internal messages
+
+The minor pin is right and the reasoning in `mix.exs` is sound, but a private GenServer message carries no semver promise at *any* level — 0.17.1 may legitimately rewrite `handle_call` internals. For an application (not a library), `mix.lock` is the real pin and only changes on an explicit `mix deps.update gemini_ex`, so this is a defence-in-depth point, not a live bug.
+
+Action — either accept it and rely on the P2 canary test to catch a bad update (recommended: cheaper, and the test is needed regardless), or harden the constraint to `{:gemini_ex, "== 0.17.0"}` and extend the existing `mix.exs` comment to say the pin is exact because the coupling is to an unversioned internal message. Do not do the second without the first.
+
+### P3 — Two transitive deps are frozen by gemini_ex's tight requirements
+
+`mix hex.outdated --all` flags:
+
+| Dep | Locked | Latest | Blocked by |
+|---|---|---|---|
+| `req` | 0.6.3 | **0.7.4** | `gemini_ex` requires `req ~> 0.6.2` |
+| `joken` | 2.6.2 | **2.7.0** | `gemini_ex` requires `joken ~> 2.6.2` |
+
+Both are "Update not possible". No advisory affects either today (`mix deps.audit` is clean), and neither is on live_dj's hot path — `req` is gemini_ex's REST client, `joken`/`jose` only serve Vertex service-account auth, which this app does not use (`runtime.exs` configures an AI Studio API key). The exposure is future: a `req` advisory could not be remediated without a gemini_ex release, and `req` is a full minor behind.
+
+Action — no change now. Track it: if `mix deps.audit` ever flags `req` or `joken`, the fix is an upstream gemini_ex issue/PR, not a local `mix deps.update`. Worth a line in the `mix.exs` comment block so the next person does not waste time trying to bump them.
+
+### P3 — No pinned toolchain; the declared floor is three minors below what is actually used
+
+`elixir --version` → 1.20.3 / OTP 29. `mix.exs` declares `elixir: "~> 1.17"` (satisfied), README says "Requires Elixir `~> 1.17` (developed on 1.20 / OTP 29)". But there is **no `.tool-versions`**, no `.mise.toml`, no CI workflow, and **no OTP floor** declared anywhere.
+
+So nothing verifies the 1.17 claim — the app has only ever been compiled and tested on 1.20/OTP 29. Anyone provisioning from the stated floor gets an untested combination, and `deps/` includes `bandit` 1.12 / `thousand_island` 1.5, which are themselves newer libraries.
+
+Action — pick one and make it true:
+
+1. Add `.tool-versions` recording the toolchain actually in use, so dev/CI/Docker agree:
+   ```
+   elixir 1.20.3-otp-29
+   erlang 29.0.5
+   ```
+2. Either raise the `mix.exs` floor to what is genuinely supported (`elixir: "~> 1.17"` → keep only if you intend to test it), or leave it and treat 1.17 as a best-effort claim in the README rather than a guarantee.
+
+### P3 (nit, non-dep) — `.dockerignore` exists with no `Dockerfile`
+
+`.dockerignore` is present and carefully written (it excludes `.env` with a comment about `COPY . .`), but there is no `Dockerfile` anywhere in the repo and the README never mentions Docker. Either the image build was dropped or it was never added.
+
+Action — add the `Dockerfile` or delete `.dockerignore`; a lone ignore file suggests a build that does not exist and will drift out of date if one is added later.
 
 ---
 
-## LOW — `.formatter.exs` does not import plug's exported formatter config
-
-Verified by inspecting each dep's `.formatter.exs`: **plug exports** `locals_without_parens` (`plug: 1, plug: 2, forward: 2..4, match: 2..3, get/post/put/patch/delete: 2..3`). bandit, websock_adapter, websock, jason and gemini_ex export nothing (bandit/websock_adapter/websock/jason ship no `.formatter.exs` at all; altar/req ship `inputs`-only files with no `export:` key). typed_struct exports `field: 2, field: 3` but is transitive-only and not used in this repo's code.
-
-`lib/live_dj/router.ex` uses `use Plug.Router` and writes `plug(Plug.Static, ...)` with parens — correct output today, but only because the formatter has no idea `plug` is a macro DSL. Importing plug's export gives the idiomatic paren-free style and makes any future `get "/health", ...` route format correctly.
-
-**Fix** — `.formatter.exs`:
-
-```diff
- [
-+  import_deps: [:plug],
-   inputs: ["{mix,.formatter}.exs", "{config,lib,test}/**/*.{ex,exs}"]
- ]
-```
-
-Then `mix format` and commit the reflow in one isolated commit.
-
----
-
-## LOW — `req` held two minors back by a gemini_ex pin (transitive, no action available)
-
-`mix hex.outdated --all` shows the single non-current package in the whole graph:
+## Commands run
 
 ```
-req    0.6.3    0.7.4    Update not possible
-```
-
-Blocked by gemini_ex's own `{:req, "~> 0.6.2"}`. Not fixable from this repo — an override would be worse than the problem. req 0.6.3 shipped 2026-07-16 (6 weeks old) and carries no advisory, so this is informational. It is however a second data point on the same theme as the HIGH finding: **gemini_ex pins all seven of its deps to patch-level `~> x.y.z` ranges** (`jason ~> 1.4.4`, `joken ~> 2.6.2`, `req ~> 0.6.2`, `telemetry ~> 1.4.2`, `typed_struct ~> 0.3.0`, `websockex ~> 0.5.1`, `altar ~> 0.2.0`). Expect gemini_ex to be the binding constraint on this project's whole dependency graph, and expect version-conflict friction if you ever add a dep that wants a newer req or jason.
-
-Track only: `typed_struct` (transitive via gemini_ex) last released **2022-02-15**, 4.5 years stale. Widely used and effectively feature-complete, so not a defect — just note it is unmaintained if it ever surfaces in a stack trace.
-
----
-
-## Dev/test tooling gap — recommendation kept proportionate
-
-8 modules in `lib/`, 3 test files, a demo repo. Do **not** install the full production gauntlet. Ranked:
-
-| Tool | Verdict | Rationale |
-|---|---|---|
-| `mix_audit` | **Add** (see MEDIUM above) | Closes a real zero-coverage gap. Zero maintenance cost, runs in seconds. |
-| `credo` | **Optional** | This codebase is already idiomatic and heavily commented. Credo would mostly generate noise on a repo whose value is pedagogical. Add only if you want the enforcement in CI. |
-| `dialyxir` | **Skip for now** — but the one place it would pay off is here | The whole risk surface of this app is untyped struct pattern-matching against a churning 0.x library. Dialyzer would catch a `Gemini.Types.Live.*` shape change at analysis time rather than at runtime. The cost is a multi-minute PLT build on a repo with no CI. Revisit if you loosen the gemini_ex pin. |
-| `excoveralls` | **Skip** | 3 test files. Coverage percentage carries no information at this size. |
-
-There is also **no CI** (`.github/workflows` does not exist). If you add only one automated check, make it `mix deps.audit` — it is the only finding here that can change without you touching the repo.
-
----
-
-## Verification commands run
-
-```
-mix hex.outdated              # 5/5 direct deps Up-to-date
-mix hex.outdated --all        # 21/22 current; req blocked by gemini_ex
-mix hex.audit                 # no retired/advisory packages
-mix deps.unlock --check-unused# clean
-elixir -e 'Version.match?(...)'  # constraint semantics confirmed
-curl hex.pm/api/packages/*    # release dates + retirement maps for all deps
-grep -rn <each dep> lib/ config/ test/  # usage confirmed for all 5
-cat deps/*/.formatter.exs     # formatter exports enumerated
+mix hex.outdated            # all 6 direct deps up-to-date
+mix hex.outdated --all      # req + joken "Update not possible"
+mix deps.audit              # No vulnerabilities found.
+mix hex.audit               # No retired or security advisory packages found
+mix deps.unlock --check-unused   # clean
+mix xref graph --format stats    # 7 files, 0 compile edges, 0 cycles
+mix compile --warnings-as-errors --force   # clean
+mix test                    # 49 passed
 ```

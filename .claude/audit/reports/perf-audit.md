@@ -1,360 +1,488 @@
-# live-dj-ex — performance audit (real-time audio streaming)
+# live-dj — performance audit (latency & throughput)
 
-Scope: BEAM process mailboxes, binary handling, WebSocket frame throughput, per-connection
-memory. Findings only.
+Scope: `socket.ex`, `live_session.ex`, `tools.ex`, `main.js`, `pcm-processor.js`, `persona.ex`.
+Every cost below is traced to a line I read, including the `gemini_ex`, `bandit`, `thousand_island`
+and `websockex` code the hot path actually reaches.
 
-Verified call chain for one mic chunk:
+## Reference numbers used throughout
 
-```
-Bandit conn process (= LiveDJ.Socket)  handle_in/2                       socket.ex:91
-  -> GenServer.call(session, {:send_realtime_input, ...})   [5_000 ms]   deps/gemini_ex/.../session.ex:239
-     -> Base.encode64 + Jason.encode!                                    session.ex:449, websocket.ex:268
-     -> :gen.call(websockex_pid, :"$websockex_send", ...)   [5_000 ms]   deps/websockex/lib/websockex.ex:471
-        -> TLS write to Gemini
-```
-
-Three synchronous process hops, two 5-second timeouts, one JSON encode and one base64 encode,
-**per chunk**.
+| Quantity | Value | Source |
+|---|---|---|
+| Mic frame | 1600 samples / 3200 bytes / 100 ms | `pcm-processor.js:10` |
+| Mic frame rate | 10 /s | ditto |
+| Worklet `process()` rate @48 kHz ctx | 375 /s (128-sample quantum) | `pcm-processor.js:22` |
+| Downstream voice | 24 kHz s16le = 48 000 B/s PCM = 64 000 B/s as base64 | `Audio.decode_output`, `socket.ex:188` |
+| Upstream per frame on the wire | 3200 B PCM → 4272 B base64 → ~4.3 KB JSON | `session.ex:969`, `websocket.ex:267` |
 
 ---
 
-## H1 — Mic chunks are emitted once per 128-sample render quantum: ~375 WebSocket frames/sec of ~85 bytes each
+## P1 — Unbounded downstream mailbox: a wedged browser buffers ~1.9 MB of voice per connection before anything notices
 
-**Severity: HIGH** (this is the multiplier on every other cost in the system)
+**`lib/live_dj/socket.ex:116-133`, `lib/live_dj/application.ex:12`**
 
-`priv/frontend/pcm-processor.js:9-33` — `process()` is invoked once per AudioWorklet render
-quantum (128 frames). `priv/frontend/pcm-processor.js:31` posts a message on *every* invocation
-with no accumulation, and `priv/frontend/main.js:98-101` forwards each one straight to
-`ws.send()`.
+The downstream path has no flow control anywhere along its length:
 
-Quantified, at a 48 kHz context (`ratio = 3`):
+1. `gemini_ex` invokes `on_message` / `on_transcription` with a bare `send/2`
+   (`deps/gemini_ex/lib/gemini/live/session.ex:759` and `:866,:870` → `invoke_callback`), wired to
+   `&send(owner, {:gemini, &1})` at `socket.ex:60-61`. `send/2` never blocks and never signals fullness.
+2. `handle_info/2` converts each to `{:push, frames, state}`.
+3. Bandit turns each frame in that list into exactly one `:gen_tcp.send`
+   (`deps/bandit/lib/bandit/websocket/connection.ex:300-320` → `ThousandIsland.Socket.send/2` at
+   `deps/thousand_island/lib/thousand_island/socket.ex:102-113`).
 
-| | value |
-|---|---|
-| render quanta/sec | 48000 / 128 = **375** |
-| samples per message | 128 / 3 ≈ 42.7 |
-| **payload per WS frame** | **~85 bytes** |
-| **frames/sec/listener** | **375** |
+`:gen_tcp.send` is the *only* backpressure in the system, and it is applied to the wrong thing: it
+blocks **the socket process**, which is also the only consumer of the mailbox that is filling up.
 
-Downstream amplification per listener:
+**How long it blocks:** ThousandIsland defaults to `send_timeout: 30_000, send_timeout_close: true`
+(`deps/thousand_island/lib/thousand_island/transports/tcp.ex:24-25`). `application.ex:12` starts
+Bandit with only `plug:` and `port:`, so that default stands. One browser whose receive window
+closes — a throttled background tab, a phone on a bad link — parks the socket process inside
+`:gen_tcp.send` for **up to 30 seconds**.
 
-- Browser -> server: 85 B payload + 6 B masked WS header + ~29 B TLS record + 40 B TCP/IP
-  ≈ **160 B on the wire for 85 B of audio (1.9x)**, at 375 packets/sec.
-- Server -> Gemini (`session.ex:449` -> `websocket.ex:268`): `Base.encode64(85)` = 116 chars,
-  wrapped in `{"realtimeInput":{"audio":{"data":"…","mimeType":"audio/pcm;rate=16000"}}}`
-  (74 fixed chars) ≈ 190 B JSON, ≈ 260 B with TLS/TCP.
-  **~97 KB/s of egress for 32 KB/s of audio (3.0x)**, at 375 TLS records/sec.
-- 375 `GenServer.call`/sec, 375 `Jason.encode!`/sec, 375 `Base.encode64`/sec,
-  750 `Telemetry.execute`/sec, ~1,125 inter-process message hops/sec — **per listener**.
+**Measurable impact, per stalled connection:**
 
-**At 10x concurrent listeners:** 3,750 `handle_in/2`/sec, 3,750 JSON encodes, 3,750 base64
-encodes, 7,500 telemetry executes, **~11,250 process context switches/sec**, 3,750 TLS writes/sec,
-and ~970 KB/s egress for 320 KB/s of actual audio. The scheduler work is dominated by
-per-message overhead, not by the audio itself.
+- Mailbox: Gemini keeps producing at ≥64 000 B/s of base64 (it generates a turn's audio faster than
+  real time). 30 s × 64 KB/s ≈ **1.9 MB of queued binaries plus `ServerMessage`/`ServerContent`
+  structs**, with no cap and no log line.
+- GC amplification: the queued *terms* live on the process heap. The default `fullsweep_after` is
+  65535, and `bandit/websocket/handler.ex:14-16` only applies `:fullsweep_after`/`:max_heap_size` if
+  they were passed in `connection_opts` — `router.ex:26` passes neither. So the socket process grows
+  a large heap and repeatedly copies the backlog during minor GCs.
+- Upstream damage: `handle_in/2` is called by Bandit **in this same process**, so it is not running
+  either. The kernel receive buffer fills, then the browser's send buffer. When the send finally
+  unblocks, the socket drains up to 300 queued mic frames back-to-back — 300 `GenServer.call`s
+  shipping ~1.3 MB of base64 of *stale* audio into Gemini, which the model will answer.
+- The router's `timeout: 60_000` (`router.ex:26`) does not help: it is a read-idle timeout, not a
+  write timeout.
 
-**Fix** — buffer in the worklet to ~100 ms (1600 samples @ 16 kHz = 3200 bytes) before posting.
-In `pcm-processor.js`, accumulate decimated samples into a class-level array and only
-`postMessage` when `>= 1600` samples are ready (keep emitting `rms` per quantum if barge-in
-responsiveness matters — or compute a running RMS and send it with the flushed chunk):
-
-```js
-constructor() { super(); this.ratio = sampleRate / 16000; this._frac = 0; this._buf = []; }
-// ... in process(), push decimated samples into this._buf, then:
-while (this._buf.length >= 1600) {
-  const slice = this._buf.splice(0, 1600);
-  const int16 = new Int16Array(1600);
-  for (let i = 0; i < 1600; i++) { const s = Math.max(-1, Math.min(1, slice[i])); int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
-  this.port.postMessage({ pcm: int16.buffer, rms }, [int16.buffer]);
-}
-```
-
-Result: **375 -> 10 messages/sec (37.5x reduction)** in frames, GenServer calls, JSON encodes,
-telemetry calls and TLS records; Gemini egress amplification drops from 3.0x to **1.34x**
-(4.3 KB per chunk at 10/sec = 43 KB/s). 100 ms is well inside the Live API's expected chunking
-and adds ~50 ms of average input latency — negligible against network + model latency.
-
----
-
-## H2 — `send_realtime_input` is a blocking `GenServer.call` on the socket process with the default 5 s timeout, and a timeout kills the connection
-
-**Severity: HIGH**
-
-`lib/live_dj/socket.ex:91` (and identically `lib/live_dj/minimal.ex:46`).
-
-`Session.send_realtime_input/2` is `GenServer.call(session, {:send_realtime_input, opts})`
-(`deps/gemini_ex/lib/gemini/live/session.ex:239`) — **no timeout argument is exposed**, so it is
-the 5,000 ms default. Inside, it calls `WebSockex.send_frame/2`, itself a `:gen.call` with its
-own 5,000 ms timeout (`deps/websockex/lib/websockex.ex:463,471`), which blocks until the TLS
-write completes.
-
-Three consequences:
-
-1. **A `GenServer.call` timeout is an `exit` raised in the *caller*, and `Process.flag(:trap_exit, true)`
-   at `socket.ex:44` does not catch it.** `trap_exit` only converts exit *signals* from linked
-   processes into messages; it does nothing for an exit raised inside the calling process. So a
-   Gemini socket that stalls for 5 s **crashes the browser connection**, and `handle_in/2`'s
-   `{:error, reason}` clause at `socket.ex:95-97` is dead code for the timeout case — it only
-   ever fires for `{:not_ready, status}` (`session.ex:461`). Failure mode at 10x listeners: a
-   Gemini-side stall or TLS backpressure event drops **every** connection simultaneously, and
-   nothing reconnects (see M3).
-2. **Head-of-line blocking between directions.** `handle_in` and `handle_info` are the same
-   process. While blocked upstream, no `{:push, ...}` of Gemini voice can happen, so downstream
-   playback stalls for exactly as long as the upstream call blocks — adding jitter directly to
-   `nextStart` scheduling on the client (see M4).
-3. Backpressure *does* exist toward the browser (ThousandIsland uses `active: :once`,
-   `deps/thousand_island/lib/thousand_island/handler.ex:583-599`, so at most one extra TCP
-   message sits in the mailbox), but it manifests as TCP window fill -> unbounded
-   `ws.bufferedAmount` growth in the browser, which `main.js:99` never checks.
-
-**Fix** — wrap the library call in a project-owned module and (a) pass an explicit timeout,
-(b) survive the exit rather than dying:
+**Fix (three parts, all small):**
 
 ```elixir
-defmodule LiveDJ.LiveSession do
-  @send_timeout 15_000
-  def send_audio(session, pcm) do
-    blob = Gemini.Live.Audio.create_input_blob(pcm)
-    GenServer.call(session, {:send_realtime_input, [audio: blob]}, @send_timeout)
-  catch
-    :exit, reason -> {:error, {:exit, reason}}
+# application.ex — a 2 s write deadline instead of 30 s; ThousandIsland closes the socket after it
+{Bandit,
+ plug: LiveDJ.Router,
+ port: port,
+ thousand_island_options: [transport_options: [send_timeout: 2_000]]}
+```
+
+```elixir
+# socket.ex init/1, next to the trap_exit flag at :45
+Process.flag(:trap_exit, true)
+Process.flag(:message_queue_data, :off_heap)  # backlog stops being GC'd with the heap
+Process.flag(:fullsweep_after, 10)            # release refc binaries promptly
+```
+
+```elixir
+# socket.ex — shed voice when we are already behind. Late real-time audio is worthless.
+@max_queue 40  # ~1-2 s of Gemini chunks
+
+def handle_info({:gemini, %ServerMessage{server_content: %ServerContent{} = sc}}, state) do
+  {:message_queue_len, qlen} = Process.info(self(), :message_queue_len)
+
+  cond do
+    qlen > @max_queue and not interrupted?(sc) ->
+      # drop voice only; control frames below still get through
+      {:ok, state}
+
+    true ->
+      frames = interrupted_frame(sc) ++ voice_frames(sc)
+      if frames == [], do: {:ok, state}, else: {:push, frames, state}
   end
 end
 ```
 
-and call `LiveDJ.LiveSession.send_audio(session, pcm)` at `socket.ex:91`. Dropping a chunk is
-strictly better than dropping the call. (This also satisfies the "wrap third-party APIs behind
-project-owned modules" rule, which `socket.ex` currently violates by calling
-`Gemini.Live.Session` directly.) Combined with H1 the blocking cost drops 37.5x as well.
+`Process.info(self(), :message_queue_len)` on the *local* process is an O(1) word read — it is safe
+to call per message. Note the reordering: the `interrupted` control frame should precede any trailing
+audio in the same message, so the browser flushes before it plays.
 
 ---
 
-## M1 — Unbounded socket mailbox on the downstream side; ~13 KB retained per queued message
+## P1 — Head-of-line blocking: a wedged Live session blocks the socket 100 % of the time, and shrinking the timeout does not fix it
 
-**Severity: MEDIUM**
+**`lib/live_dj/socket.ex:97`, `lib/live_dj/live_session.ex:24,33-37`**
 
-`lib/live_dj/socket.ex:59-62` — `on_message`, `on_transcription`, `on_error` and `on_close` are
-all bare `send/2` into the socket process. There is **no flow control in that direction at all**:
-the session process pushes as fast as Gemini delivers, and nothing bounds the queue.
+The upstream chain per mic frame is **two synchronous process hops**, not one:
 
-There is no selective receive anywhere and no unmatched-message accumulation — `handle_info/2`'s
-catch-all at `socket.ex:144-147` consumes everything, and Bandit forwards all mailbox messages to
-`WebSock.handle_info/2` — so the mailbox drains whenever the process is running. The risk is
-purely "while the process is blocked", which H2 makes a routine event.
-
-Memory per queued message is larger than it looks. `Jason.decode` produces the base64 audio
-string as a **sub-binary of the whole decoded JSON payload**
-(`deps/gemini_ex/lib/gemini/live/session.ex:523`). Sub-binaries are passed by reference across
-`send/2` (no data copy — good) but they **retain the entire parent binary**. For a typical
-~4.8 KB PCM output chunk that is ~6.4 KB of base64 inside a ~13 KB JSON payload, all of which
-stays alive as long as the message sits in the mailbox.
-
-Quantified: a 5 s upstream stall (i.e. exactly the H2 window) queues ~5 s x 48 KB/s of 24 kHz
-audio ≈ **240 KB of PCM held as ~650 KB of retained JSON payloads**, plus one `ServerMessage`
-struct per chunk, plus a second `{:transcription, ...}` message per `serverContent`
-(`session.ex:757-763` invokes `on_message` *and* `handle_transcription`).
-
-**Fix** — bound it explicitly. Either set `max_heap_size` on the upgrade so a runaway connection
-is killed rather than taking the node down, or drop stale voice under pressure:
-
-```elixir
-# in handle_info, before pushing:
-{:message_queue_len, len} = Process.info(self(), :message_queue_len)
-if len > 200, do: {:ok, state}, else: {:push, frames, state}
+```
+socket proc --GenServer.call(1 s)--> Session GenServer --:gen.call(5 s)--> WebSockex proc --> TLS
+             live_session.ex:33      session.ex:449-451   websockex.ex:471
 ```
 
-Fixing H2 (so the process is never blocked for seconds) removes the practical trigger; the bound
-is defence in depth.
+`WebSockex.send_frame/2` is itself a `:gen.call` with a 5 s default
+(`deps/websockex/lib/websockex.ex:463,471`), and `session.ex:451` calls it inside `handle_call`
+with no catch. So a stalled TLS write wedges the Session GenServer for the full 5 s.
+
+**What the socket process loses while one call is in flight.** The `GenServer.call` selective
+receive is *not* the problem — the ref is created immediately before the receive, so the BEAM's
+receive-mark optimisation prevents any re-scan of the mailbox. The problem is that nothing else in
+the process runs:
+
+- Downstream `{:gemini, …}` messages queue and are not pushed. A 1 s stall = a **1 s hole in Mira's
+  voice**, caused entirely by an upstream problem.
+- `handle_in/2` is not re-entered (Bandit drives it from this same process), so mic frames back up
+  in the TCP receive buffer and arrive as a burst afterwards.
+
+**Is 1 s the right order of magnitude?** No — but the interesting part is that lowering it alone
+buys nothing. A healthy `send_audio` is sub-millisecond (two process hops plus a base64 + JSON
+encode of 3.2 KB). A *stalled* one is stalled because the Session is wedged in its own 5 s
+`send_frame`. `handle_in/2` at `socket.ex:97` retries unconditionally on the very next frame, so:
+
+| `@send_timeout` | Calls during a 5 s Session wedge | Socket blocked |
+|---|---|---|
+| 1000 ms (today) | 5 | **5000 ms — 100 %** |
+| 250 ms | 20 | **5000 ms — still 100 %** |
+
+The socket is dead for the whole wedge either way, because it re-enters the call the instant the
+previous one gives up.
+
+**Fix — shorten the timeout *and* add a hold-off so the retries stop:**
+
+```elixir
+# live_session.ex — 2.5 frame periods absorbs jitter; 10 frame periods does not help anyone
+@send_timeout 250
+```
+
+```elixir
+# socket.ex — state gains :upstream_blocked_until (init to 0)
+def handle_in({pcm, [opcode: :binary]}, %{session: session} = state) when session != nil do
+  now = System.monotonic_time(:millisecond)
+
+  if now < state.upstream_blocked_until do
+    {:ok, state}                                   # drop, do not even call
+  else
+    case LiveDJ.LiveSession.send_audio(session, pcm) do
+      :ok ->
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.warning("send_realtime_input failed: #{inspect(reason)}")
+        {:ok, %{state | upstream_blocked_until: now + 1_000}}
+    end
+  end
+end
+```
+
+With `250 ms` timeout + `1000 ms` hold-off, the same 5 s wedge blocks the socket for 250 ms out of
+every 1250 ms — **20 % instead of 100 %** — so downstream voice keeps flowing through the outage
+instead of going silent with it.
+
+**Do not "fix" this with a `Task`.** Moving the call off-process would remove the blocking but also
+remove frame ordering, and PCM delivered out of order is worse than PCM delivered late.
+
+**Related, unfixable from this repo but worth knowing:** the Session GenServer is a *bidirectional*
+serialisation point. It handles upstream `{:send_realtime_input, …}` (`session.ex:448`) and
+downstream `{:gemini_websocket, …, {:text, data}}` (`session.ex:494` → `Jason.decode!` + struct
+build + callbacks) in the same mailbox. Per-frame upstream work of `Base.encode64(3200)` +
+`Jason.encode!(~4.3 KB)` + telemetry (`session.ex:969`, `websocket.ex:267`, `:771`) therefore delays
+downstream parsing. At 10 frames/s that is ~1-2 ms/s — negligible normally, total during a stall.
+The actionable consequence: never add work to that process. The `on_tool_call` discipline in
+`socket.ex:64-67` is exactly right and must stay.
 
 ---
 
-## M2 — Unbounded transcript DOM growth: one `<div>` per streamed transcription fragment, with a forced reflow each time
+## P2 — Barge-in gate posts up to 375 messages/sec, undoing the 100 ms batching it sits next to
 
-**Severity: MEDIUM** — this is the frontend's real long-session leak, not `activeSources`.
-
-`priv/frontend/main.js:21-26`. `addLine` appends a new element to `#transcript` on **every**
-`{"type":"transcript"}` message, and `socket.ex:117-120` pushes one for every transcription
-callback. Both `input_audio_transcription` and `output_audio_transcription` are enabled
-(`socket.ex:57-58`) and the Live API streams these as **incremental fragments**, not
-one-per-utterance — several per second while either party is speaking.
-
-Over a 30-minute session that is thousands of never-removed DOM nodes. Worse, line 25 writes
-`txEl.scrollTop = txEl.scrollHeight` immediately after `appendChild`, forcing a **synchronous
-layout on every fragment** against a monotonically growing subtree — cost grows with session
-length.
-
-**Fix** — cap the buffer and coalesce consecutive fragments from the same role into the last
-line instead of creating a node per fragment:
+**`priv/frontend/pcm-processor.js:50`**
 
 ```js
-let lastLine = null, lastRole = null;
-function addLine(role, text) {
-  if (role === lastRole && lastLine) { lastLine.textContent += text; }
-  else {
-    const p = document.createElement("div");
-    p.className = "line " + role;
-    p.textContent = (role === "mira" ? "mira  " : "you  ") + text;
-    txEl.appendChild(p); lastLine = p; lastRole = role;
-    while (txEl.childElementCount > 200) txEl.removeChild(txEl.firstChild);
-  }
-  requestAnimationFrame(() => { txEl.scrollTop = txEl.scrollHeight; });
+if (rms >= this._bargeRms) this.port.postMessage({ rms });   // barge-in fast path
+```
+
+The comment on lines 8-9 says "a quantum whose level **crosses** the gate posts an RMS-only message".
+The code is level-triggered, not edge-triggered: it posts on *every* quantum that is above the gate.
+
+`process()` runs 375 times/sec at a 48 kHz context. `BARGE_RMS` is 0.02
+(`pcm-processor.js:20`, `main.js:9`), and `getUserMedia` is opened with `autoGainControl: true`
+(`main.js:100`), which pushes ordinary speech RMS to 0.05-0.3. So for the entire duration of any
+utterance the worklet emits **375 objects/sec across the MessagePort**, each structured-cloned and
+each waking the main thread — against the 10 pcm messages/sec the batching in lines 3-6 was written
+to achieve. That is **~37× the cross-thread traffic the file's own header claims to have eliminated**,
+landing on the main thread that is simultaneously running `playVoice` (`main.js:59`), `JSON.parse`,
+and DOM work.
+
+`main.js:109` makes the flood mostly idempotent (`&& speaking` short-circuits after the first one),
+but the port dispatch and task scheduling happen regardless.
+
+**Fix — edge-trigger, and let the main thread tell the worklet when it even matters:**
+
+```js
+// constructor
+this._above = false;
+this._speaking = false;
+this.port.onmessage = (e) => { this._speaking = !!e.data.speaking; };
+
+// end of process()
+const above = rms >= this._bargeRms;
+if (above && !this._above && this._speaking) this.port.postMessage({ rms });
+this._above = above;
+```
+
+```js
+// main.js — mirror playback state into the worklet
+function setSpeaking(v) {
+  speaking = v;
+  workletNode && workletNode.port.postMessage({ speaking: v });
 }
 ```
 
----
-
-## M3 — A dropped connection is unrecoverable, and the mic is never released
-
-**Severity: MEDIUM** (turns any of H2/L1 into a dead session rather than a hiccup)
-
-`priv/frontend/main.js:79` sets the status to "the line dropped — tap to reconnect", but
-`main.js:107` disabled `#talk` at the start of `go()` and **nothing ever re-enables it**, and
-`go()` is not idempotent anyway (it would create a second `AudioContext` and a second
-`getUserMedia` stream). `onclose` also never calls `micStream.getTracks().forEach(t => t.stop())`
-or `audioCtx.close()`, so the mic indicator stays on and the AudioWorklet keeps running and
-keeps `postMessage`-ing at 375 Hz into a closed socket for the life of the page.
-
-**Fix** — in `ws.onclose`, stop the worklet/mic, re-enable `#talk`, and make `go()` reconnect the
-socket only (guard `startMic()` behind `if (!audioCtx)`).
+This turns 375 msg/sec into **at most one message per barge-in event**, with identical barge-in latency.
 
 ---
 
-## M4 — `nextStart` has no drift ceiling and barge-in does not discard in-flight audio
+## P2 — Per-quantum heap allocation on the audio render thread
 
-**Severity: MEDIUM**
+**`priv/frontend/pcm-processor.js:28-33`**
 
-`priv/frontend/main.js:62-63`. `nextStart += ab.duration` with a floor at `currentTime` is the
-right *shape*, but there is no upper clamp. Gemini bursts a turn's audio faster than real time,
-so `nextStart` legitimately runs ahead — and any server-side stall (H2) that then releases a
-backlog (M1) schedules all of it contiguously, so playback latency is `nextStart - currentTime`
-and only ever recovers at a silence boundary.
+```js
+const out = [];
+...
+out.push(ch[Math.floor(idx)]);
+```
 
-Compounding it, `stopVoice()` (`main.js:68-71`) resets local state on barge-in, but the server
-keeps delivering the remainder of the interrupted turn's frames — Gemini's `interrupted` flag
-arrives *before* the in-flight audio drains. Each late frame re-enters `playVoice`, sets
-`speaking = true` and starts playing the audio the user just interrupted.
+A fresh JS `Array` is allocated on **every** `process()` call — 375/sec — and grown by `push` from
+capacity 0 to ~43 elements, which costs several internal reallocations each time. This runs on the
+audio render thread, which must complete a quantum in under 2.67 ms; the standard AudioWorklet rule
+is that `process()` allocates nothing, because a GC pause on that thread is an audible dropout, not a
+slow frame. This is the one place in the whole pipeline where an allocation is directly audible.
 
-`activeSources` itself does **not** leak: `src.onended` (`main.js:65`) removes each source, and
-the `filter` rebuild is O(n) per ended source (O(n²) per turn) but n is ~50-150 chunks — a few
-thousand operations, immaterial. The leak claim in the brief does not hold; these two are the
-real playback problems.
+There is also a redundant second pass: lines 37-41 iterate `out` to clamp and accumulate RMS, then
+lines 45-48 iterate it again to convert to int16.
 
-**Fix** — (a) clamp drift: if `nextStart - now > 1.0`, drop the chunk or reset to
-`now + 0.05`; (b) add a barge-in generation counter, incremented in `stopVoice()`, and ignore
-`playVoice` calls whose generation is stale for ~250 ms after a barge-in.
+**Fix — one preallocated scratch buffer, one fused loop, zero allocation:**
 
----
+```js
+// constructor
+this._scratch = new Float32Array(256);   // ample for a 128-sample quantum at any ratio
 
-## L1 — `timeout: 60_000` is an *idle read* timeout with no server-side keepalive
+// process()
+const out = this._scratch;
+let n = 0, idx = this._frac, sum = 0;
+while (idx < ch.length) {
+  let s = ch[idx | 0];
+  s = s < -1 ? -1 : s > 1 ? 1 : s;
+  out[n++] = s;
+  sum += s * s;
+  idx += this.ratio;
+}
+this._frac = idx - ch.length;
+const rms = n ? Math.sqrt(sum / n) : 0;
+if (rms > this._peak) this._peak = rms;
+for (let i = 0; i < n; i++) {
+  this._buf[this._len++] = out[i] < 0 ? out[i] * 0x8000 : out[i] * 0x7fff;
+  if (this._len === FRAME_SAMPLES) this._flush();
+}
+```
 
-**Severity: LOW** (real but narrow)
-
-`lib/live_dj/router.ex:27`. `websock_adapter` maps `:timeout` to Bandit's `idle_timeout`
-(`deps/websock_adapter/lib/websock_adapter.ex:84`), which ThousandIsland implements as a read
-timer that is **reset on every continuation** — including `handle_info` returns
-(`deps/thousand_island/lib/thousand_island/handler.ex:589-597`). So while the mic streams at
-375 Hz, or while Gemini pushes voice, it never fires.
-
-It *does* fire when the client stops producing: a backgrounded tab whose `AudioContext` gets
-suspended, or a paused/muted mic during a quiet stretch with no model output. There is no
-server-side ping (`socket.ex` never sends `{:ping, ...}`), so the connection is closed at 60 s
-and M3 makes that terminal.
-
-**Fix** — either send a periodic `{:ping, ""}` from a `Process.send_after/3` heartbeat in
-`socket.ex`, or raise `timeout:` to `120_000` and rely on the client sending a keepalive. Note
-that H1's batching moves the client from 375 msg/s to 10 msg/s — still far inside 60 s, so H1
-does not create a timeout risk.
-
----
-
-## L2 — `max_frame_size: 1_000_000` is ~12,000x the actual frame size
-
-**Severity: LOW**
-
-`lib/live_dj/router.ex:27`. Actual client frames are ~85 bytes today (H1) and would be ~3,200
-bytes after the fix. A 1 MB ceiling lets any client force a 1 MB per-connection buffer
-allocation, which at 10x+ concurrency is free memory amplification with no legitimate use.
-
-**Fix** — `max_frame_size: 65_536`. That is 20x headroom over a 100 ms batched chunk and still
-rejects abuse early.
+`idx | 0` also replaces 43 `Math.floor` calls per quantum (~16 000/sec).
 
 ---
 
-## L3 — Two `Telemetry.execute` calls per audio chunk, each doing an `Application.get_env` plus a recursive `redact/2` map walk
+## P2 — One DOM node and one forced reflow per Gemini server message, not per turn
 
-**Severity: LOW**
+**`priv/frontend/main.js:25-32` (server side: `lib/live_dj/socket.ex:123-126`)**
 
-`deps/gemini_ex/lib/gemini/live/session.ex:1123-1129` (`emit_telemetry_message_sent`) and
-`deps/gemini_ex/lib/gemini/client/websocket.ex:771-781` (`emit_send`) both fire on every
-`send_realtime_input`. Each goes through `Gemini.Telemetry.execute/3`
-(`deps/gemini_ex/lib/gemini/telemetry.ex:68-74`), which does an `Application.get_env(:gemini_ex,
-:telemetry_enabled)` and then recursively `redact/2`s both the measurements and metadata maps.
-`emit_send` additionally runs `detect_message_type/1` — an `Enum.find_value` with two `Map.has_key?`
-probes per candidate (`websocket.ex:837-843`).
+`gemini_ex` fires `on_transcription` once per `serverContent` message
+(`deps/gemini_ex/lib/gemini/live/session.ex:756-763` → `handle_transcription` at `:861-871`), i.e.
+at the audio-chunk rate, not the turn rate. `socket.ex:123-126` pushes one `Jason.encode!` + one WS
+text frame + one `:gen_tcp.send` for each. The browser then, per fragment:
 
-At 375 chunks/sec that is **750 telemetry executes/sec/listener, 7,500/sec at 10x**, with no
-handlers attached anywhere in this project (no `:telemetry.attach` in `lib/`). Individually cheap;
-collectively pure waste.
+- `JSON.parse` (`main.js:88`)
+- `createElement` + `appendChild` — a brand-new `<div>` per fragment, so one spoken sentence becomes
+  many divs rather than one growing line (`main.js:26-29`)
+- `txEl.childElementCount` read + possible `removeChild` (`main.js:30`)
+- **`txEl.scrollTop = txEl.scrollHeight`** (`main.js:31`) — reading `scrollHeight` right after a DOM
+  mutation forces a **synchronous layout**, on the same main thread that is decoding and scheduling
+  24 kHz voice buffers.
 
-**Fix** — `config :gemini_ex, telemetry_enabled: false` in `config/prod.exs`. H1 independently
-cuts this 37.5x.
+The `MAX_LINES = 60` cap (added by the comment at lines 21-23 to bound "thousands of turns") is
+reached in a handful of seconds at this rate, so `removeChild` then runs on essentially every
+message too.
+
+**Fix — coalesce fragments into the current line instead of creating a new one, and stop forcing
+layout on every one:**
+
+```js
+let lastRole = null, lastEl = null;
+function addLine(role, text) {
+  if (role === lastRole && lastEl) {
+    lastEl.textContent += text;                 // same speaker still talking → extend the line
+  } else {
+    lastEl = document.createElement("div");
+    lastEl.className = "line " + role;
+    lastEl.textContent = (role === "mira" ? "mira  " : "you  ") + text;
+    txEl.appendChild(lastEl);
+    lastRole = role;
+    while (txEl.childElementCount > MAX_LINES) txEl.removeChild(txEl.firstElementChild);
+  }
+  if (!scrollQueued) {                          // one forced layout per frame, not per fragment
+    scrollQueued = true;
+    requestAnimationFrame(() => { txEl.scrollTop = txEl.scrollHeight; scrollQueued = false; });
+  }
+}
+```
+
+The server side can stay as-is once the client coalesces; if you want the wire traffic down too,
+buffer transcription text in socket state and flush on role change.
 
 ---
 
-## L4 — `Session.connect/1` blocks `init/1` for up to 30 s, then a stale audio backlog is flushed
+## P2 — Nothing is released when the socket closes: the mic, the AudioContext and the worklet run forever
 
-**Severity: LOW**
+**`priv/frontend/main.js:85`, `:96-113`, `:115-123`**
 
-`lib/live_dj/socket.ex:73-74`. `Session.connect/1` is `GenServer.call(session, :connect, 30_000)`
-(`session.ex:156`) covering a TLS handshake plus `wait_for_setup_complete` with its own 30 s
-receive (`session.ex:684-688`). The WebSock `init/1` runs in the Bandit connection process, so
-the browser's socket is already accepted and the client (`main.js:98-101`) starts sending as soon
-as `readyState === OPEN`.
+```js
+ws.onclose = () => { setStatus("the line dropped — tap to reconnect"); setOrb("idle"); };
+```
 
-`active: :once` means only one packet is buffered in the mailbox, but the rest sit in the OS
-receive buffer / TCP window. When `init/1` returns, `handle_in/2` drains a backlog of audio that
-is by then 0.5-2 s old and forwards it to Gemini as if it were live, which the model's VAD sees
-as a burst of past speech. Also, the ThousandIsland read timer is not armed until the
-continuation returns, so a slow connect is invisible to the idle timeout.
+`onclose` releases nothing and reconnects nothing. Concretely, after any disconnect:
 
-**Fix** — connect asynchronously: return `{:ok, %{session: session, ready: false}}` from `init/1`,
-kick `Session.connect/1` off in a `Task`, drop binary frames while `ready: false`, and flip the
-flag on `setup_complete`. Discards ~1 s of pre-roll audio instead of replaying it stale.
+- `micStream` (`main.js:99`) is never `getTracks().forEach(t => t.stop())`-ed → the browser's
+  recording indicator stays on for the life of the page.
+- `audioCtx` (`main.js:97`) is never `close()`-d and `workletNode` is never `disconnect()`-ed, so the
+  render thread keeps running `process()` **375 times/sec forever**, still allocating (P2 above),
+  still posting PCM batches. `main.js:108` checks `ws.readyState` so nothing is transmitted — the CPU
+  is burned for output that is discarded.
+- The status text promises "tap to reconnect", but the only click handler is on `$("talk")`
+  (`main.js:123`), which `go()` sets to `disabled = true` at `main.js:116` and never re-enables. There
+  is no reconnect path at all.
+
+**Fix:**
+
+```js
+function teardown() {
+  if (workletNode) { workletNode.port.onmessage = null; workletNode.disconnect(); workletNode = null; }
+  if (micStream) { micStream.getTracks().forEach((t) => t.stop()); micStream = null; }
+  if (audioCtx) { audioCtx.close().catch(() => {}); audioCtx = null; }
+  stopVoice();
+}
+
+ws.onclose = () => {
+  teardown();
+  setStatus("the line dropped — tap to reconnect");
+  setOrb("idle");
+  $("talk").disabled = false;
+  $("talk").textContent = "talk to mira";
+};
+```
 
 ---
 
-## Clean areas (one line each)
+## P3 — `playVoice` copies every voice chunk twice
 
-- **`voice_frames/1` + `++`** (`socket.ex:111,181-188`): non-issue. `parts` is almost always a
-  single element and `interrupted_frame/1` returns `[]`, so the `++` copies a 1-cons list at
-  ~10-20 messages/sec. Immeasurable. (Unrelated robustness note, since it is on the hot path:
-  the pattern `%{inline_data: %{"data" => b64}}` mixes an atom key with a string key — a part
-  arriving with `%{inline_data: %{data: ...}}` would be silently dropped as audio loss, not an
-  error.)
-- **Base64 decode cost** (`socket.ex:182` -> `Audio.decode_output/1`): non-issue. 24 kHz mono s16
-  is 48 KB/s of PCM per session = 64 KB/s of base64; `Base.decode64!` runs at hundreds of MB/s.
-  Decoding happens in the socket process, which is the correct side. Large binaries cross the
-  session -> socket boundary **by reference** (refc/sub-binary), not copied. The only memory
-  concern is the retained parent payload, covered in M1.
-- **Selective receive / unmatched message accumulation**: none. `socket.ex:144-147` consumes
-  everything; `Logger.debug` there is **not** a hot-path cost — the Logger macro evaluates its
-  argument lazily behind a level check, the configured level is `:info` in dev and prod
-  (`config/dev.exs:2`, `config/prod.exs:2`), and no audio message reaches that clause anyway
-  (they match at `socket.ex:110` / `socket.ex:115`). Worth knowing: raising the level to `:debug`
-  for troubleshooting would `inspect/1` `ServerMessage` structs containing full base64 audio, both
-  here and at `deps/gemini_ex/lib/gemini/live/session.ex:517`.
-- **Per-frame config lookups**: none. `LiveDJ.config/0` is called once in `init/1`
-  (`socket.ex:47`); `router.ex:24`'s `Application.get_env` is once per HTTP upgrade, not per
-  frame. (`minimal.ex:29,33` calls `LiveDJ.config()` twice in `init/1` — cosmetic, once per
-  connection.)
-- **Per-connection process model**: correct. One socket process, one linked session process, no
-  shared bottleneck between listeners, no global registry or singleton in the audio path.
+**`priv/frontend/main.js:60-64`**
 
-## Not set, worth setting
+```js
+const f32 = new Float32Array(int16.length);          // alloc #1
+for (...) f32[i] = int16[i] / 0x8000;                // fill
+const ab = audioCtx.createBuffer(1, f32.length, 24000);
+ab.getChannelData(0).set(f32);                        // alloc #2 + full memcpy
+```
 
-`websock_adapter` accepts `:fullsweep_after` and `:max_heap_size` on
-`WebSockAdapter.upgrade/4` (`deps/websock_adapter/lib/websock_adapter.ex:96`) and neither is
-configured at `router.ex:27`. These are long-lived processes churning refcounted binaries at
-tens of KB/sec in both directions — the textbook case for
-`fullsweep_after: 20, max_heap_size: 50_000` on the upgrade options, which forces the connection
-process to reclaim binary references promptly and caps a runaway mailbox (M1) at the process
-rather than the node.
+Two full-size Float32 buffers per chunk where one suffices — at 48 000 B/s of PCM that is ~96 KB/s of
+avoidable Float32 allocation plus the memcpy, on the main thread, at the chunk rate.
+
+**Fix:**
+
+```js
+const int16 = new Int16Array(buf);
+const ab = audioCtx.createBuffer(1, int16.length, 24000);
+const ch = ab.getChannelData(0);
+for (let i = 0; i < int16.length; i++) ch[i] = int16[i] / 0x8000;
+```
+
+Also worth adding `src.disconnect()` inside the `onended` handler at `main.js:71`, so the graph node
+is released rather than waiting on GC. The `activeSources.filter` there allocates a new array per
+ended source, which is O(N²) over a turn; with N in the tens it is not worth restructuring, but the
+`disconnect()` is free.
+
+---
+
+## P3 — `_flush()` copies 3.2 KB per frame that it then transfers away
+
+**`priv/frontend/pcm-processor.js:53-57`**
+
+```js
+const frame = this._buf.slice(0, this._len);   // 3200-byte copy
+this.port.postMessage({ pcm: frame.buffer, rms: this._peak }, [frame.buffer]);
+```
+
+Since the buffer is transferred (detached) anyway, the copy is unnecessary — transfer `_buf` itself
+and allocate the replacement. Same allocation count, one fewer 3.2 KB memcpy, 10×/sec:
+
+```js
+const buf = this._buf.buffer;
+this.port.postMessage({ pcm: buf, rms: this._peak }, [buf]);
+this._buf = new Int16Array(FRAME_SAMPLES);
+this._len = 0;
+this._peak = 0;
+```
+
+Note this only holds while `_flush` is called exactly at `_len === FRAME_SAMPLES` (`:47`), which it is.
+
+---
+
+## P3 — `max_frame_size: 1_000_000` for a client that only ever sends 3200 bytes
+
+**`lib/live_dj/router.ex:26`**
+
+The browser sends fixed 3200-byte binary frames (`pcm-processor.js:10`) and no text frames
+(`socket.ex:107-109`). A 1 MB ceiling lets any client make Bandit's extractor buffer 1 MB per frame
+per connection before rejecting it. `16_384` covers the real protocol with 5× headroom.
+
+Same line: pass `fullsweep_after: 10` here if you would rather configure it at the upgrade than in
+`init/1` — `deps/bandit/lib/bandit/websocket/handler.ex:14-16` applies `:fullsweep_after` and
+`:max_heap_size` from `connection_opts` as process flags, and `max_heap_size` would additionally give
+the P1 mailbox growth a hard ceiling instead of an OOM.
+
+---
+
+## P3 — `String.to_atom/1` on a derived key in `dispatch`'s helper
+
+**`lib/live_dj/tools.ex:77`**
+
+```elixir
+defp arg(args, key) when is_map(args), do: args[key] || args[String.to_atom(key)] || ""
+```
+
+Today `key` is always the literal `"mood"` or `"title"` from lines 68 and 71, so no unbounded atom
+creation occurs and the runtime cost is one atom-table lookup on a path that fires only on a tool
+call (rare). It is flagged only because it is a `String.to_atom` on a *parameter*: the moment a
+future caller passes anything model- or user-derived it becomes the atom-exhaustion bug. Pass the
+atom directly and delete the conversion:
+
+```elixir
+def dispatch("play_playlist", args), do: {%{action: "playlist", value: arg(args, "mood", :mood)}, %{result: "ok"}}
+defp arg(args, str, atom) when is_map(args), do: args[str] || args[atom] || ""
+defp arg(_args, _str, _atom), do: ""
+```
+
+---
+
+## Clean areas (one line each, as requested)
+
+- **`lib/live_dj/persona.ex`** — confirmed correct. `@external_resource` at `:11` plus
+  `@persona @persona_path |> File.read!() |> String.trim()` at `:13` and the interpolated
+  `@instruction` at `:15-23` mean the file is read by the *compiler*; `system_instruction/0` at `:35`
+  returns a literal map from the module's constant pool. Zero disk I/O and zero string work per
+  connection. Nothing to change.
+- **`lib/live_dj/tools.ex` `dispatch/2` (`:67-75`)** — verified: pure head-pattern-match dispatch over
+  literal maps, no I/O, no process interaction, no iteration, O(1) and allocation-bounded. The
+  synchronous-voice-stall constraint documented at `:5-10` is genuinely honoured.
+- **`lib/live_dj/socket.ex` `handle_in/2` own work** — the socket process's per-frame cost is a 2-key
+  map, a 2-cons keyword list and a tuple (`live_session.ex:33-37`); `Audio.create_input_blob/2`
+  defaults to `encode: false` (`deps/gemini_ex/lib/gemini/live/audio.ex:115-127`), so the 3200-byte
+  binary is passed by reference and the base64 happens in the Session process. Nothing to hoist here —
+  the issues are the blocking (P1) and the mailbox (P1), not the arithmetic.
+- **`lib/live_dj/socket.ex` downstream frame building (`:117,:187-194,:208`)** — the `++` is against a
+  one- or zero-element list and the `Base.decode64!` is unavoidable (the browser needs raw PCM).
+- **per-message-deflate** — correctly *not* negotiated: `router.ex:26` omits `compress: true`, which
+  `deps/bandit/lib/bandit.ex:201-203` requires per-upgrade. Incompressible 24 kHz PCM is therefore not
+  being pointlessly zlib'd in both directions.
+
+## Suggested order
+
+1. P1 mailbox shedding + `send_timeout: 2_000` + the two process flags (`socket.ex`, `application.ex`) — this is the one that turns a bad network into a bounded failure rather than ~2 MB and a 30 s freeze.
+2. P1 hold-off + `@send_timeout 250` (`socket.ex`, `live_session.ex`) — keeps voice flowing through an upstream stall.
+3. P2 worklet edge-trigger + zero-alloc `process()` (`pcm-processor.js`) — both are contained rewrites of one function.
+4. P2 transcript coalescing and P2 teardown (`main.js`).
+5. The P3s as cleanup.
