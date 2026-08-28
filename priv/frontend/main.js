@@ -94,9 +94,12 @@ async function startMic() {
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
   const source = audioCtx.createMediaStreamSource(micStream);
-  workletNode = new AudioWorkletNode(audioCtx, "pcm-processor");
+  workletNode = new AudioWorkletNode(audioCtx, "pcm-processor", {
+    processorOptions: { bargeRms: BARGE_RMS },                            // one source of truth
+  });
   workletNode.port.onmessage = (e) => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data.pcm);       // 16k PCM up
+    // pcm arrives in ~100 ms batches; rms-only messages come between them for barge-in
+    if (e.data.pcm && ws && ws.readyState === WebSocket.OPEN) ws.send(e.data.pcm);
     if (e.data.rms >= BARGE_RMS && speaking) stopVoice();                  // client-side barge-in
   };
   source.connect(workletNode);
