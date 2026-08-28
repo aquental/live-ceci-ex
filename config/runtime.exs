@@ -41,7 +41,24 @@ port =
     value -> String.to_integer(value)
   end
 
+# MODEL picks the backend. Read here rather than baked in at compile time, so
+# switching providers is an .env edit and a restart.
+{provider, model, voice} =
+  case System.get_env("MODEL") |> to_string() |> String.upcase() do
+    "GROK" ->
+      {LiveDJ.Provider.Grok, System.get_env("GROK_LIVE_MODEL") || "grok-voice-latest",
+       System.get_env("GROK_LIVE_VOICE") || "eve"}
+
+    _ ->
+      {LiveDJ.Provider.Gemini,
+       System.get_env("GOOGLE_LIVE_MODEL") || Application.get_env(:live_dj, :model),
+       System.get_env("GOOGLE_LIVE_VOICE") || Application.get_env(:live_dj, :voice)}
+  end
+
 config :live_dj,
-  model: System.get_env("LIVE_MODEL") || Application.get_env(:live_dj, :model),
-  voice: System.get_env("LIVE_VOICE") || Application.get_env(:live_dj, :voice),
+  provider: provider,
+  model: model,
+  voice: voice,
+  # POSIX spelling in .env, BCP-47 on the wire. Both providers want the latter.
+  language: LiveDJ.normalize_language(System.get_env("LANGUAGE")),
   port: port
