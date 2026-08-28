@@ -2,14 +2,16 @@
 
 Talk to **Mira**, a late-night radio DJ. Ask her to play something. Talk over her mid-sentence and she stops, listens, and picks the thread back up.
 
-An Elixir port of [`live-dj`](../live-dj) — the demo from **EP1 of the Multimodal Agents Cookbook**. Built on the **Gemini Live API** via [`gemini_ex`](https://hex.pm/packages/gemini_ex), with **no Phoenix and no agent framework**, so the whole primitive stays visible.
+An Elixir port of [`live-dj`](../live-dj) — the demo from **EP1 of the Multimodal Agents Cookbook**. **No Phoenix and no agent framework**, so the whole primitive stays visible.
+
+Two backends sit behind the same bridge: the **Gemini Live API** via [`gemini_ex`](https://hex.pm/packages/gemini_ex), and **xAI's Voice Agent**. `MODEL` in `.env` picks one. The browser cannot tell the difference — both negotiate the 16 kHz up / 24 kHz down PCM the client already speaks, so nothing in `priv/frontend` changes either way.
 
 ## Run it
 
 Requires Elixir `~> 1.17` (developed on 1.20 / OTP 29).
 
 ```bash
-cp .env.example .env          # paste your GOOGLE_API_KEY (Gemini Developer API / AI Studio, not Vertex)
+cp .env.example .env          # paste GOOGLE_API_KEY, or GROK_API_KEY with MODEL=GROK
 mix deps.get
 
 mix run --no-halt
@@ -25,9 +27,14 @@ Try: *"hey Mira"* · *"can you play something dream pop"* · *"skip this"* — t
 
 | Variable | Default | What it does |
 |---|---|---|
+| `MODEL` | `GOOGLE` | `GOOGLE` or `GROK` — which backend answers |
+| `LANGUAGE` | — | locale for the voice, POSIX or BCP-47 spelling (`pt_BR` and `pt-BR` both work). Omitted entirely when unset; both APIs reject a null here. |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | either name works; `gemini_ex` wants the second, the Python repo's `.env` has the first. Missing it warns at boot (except in `:test`). |
-| `LIVE_MODEL` | `gemini-3.1-flash-live-preview` | the Live model |
-| `LIVE_VOICE` | `Aoede` | Mira's **native Live** voice |
+| `GOOGLE_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | the Gemini Live model |
+| `GOOGLE_LIVE_VOICE` | `Aoede` | Mira's **native Live** voice |
+| `GROK_API_KEY` | — | required when `MODEL=GROK` |
+| `GROK_LIVE_MODEL` | `grok-voice-latest` | the xAI voice model |
+| `GROK_LIVE_VOICE` | `eve` | Mira's xAI voice |
 | `PORT` | `8000` | the HTTP port |
 
 `LiveDJ.config/0` reads the resolved values back out, at call time — so what `runtime.exs` writes at boot is what the session opens with.
@@ -50,11 +57,22 @@ Where the Python version runs **two asyncio tasks** (mic up, audio down), the BE
 
 `LiveDJ.Application` starts exactly one child — `{Bandit, plug: LiveDJ.Router, port: port}`. Bandit supervises the per-connection processes, so there is no hand-rolled supervision tree to get wrong.
 
-## The module that matters
+## The module that matters, and the seam under it
 
-[`LiveDJ.Socket`](lib/live_dj/socket.ex) is the whole app: one browser socket in, one Gemini Live session out, and everything that makes Mira *Mira* layered on top of that single bridge.
+[`LiveDJ.Socket`](lib/live_dj/socket.ex) is the whole app: one browser socket in, one model session out, and everything that makes Mira *Mira* layered on top of that single bridge.
 
-The primitive underneath is four steps — open a session, send the mic up, receive voice back, push it to the browser. `Socket` adds `system_instruction`, `tools`, input/output transcription, and the `on_transcription` / `on_error` / `on_close` / `on_tool_call` callbacks — plus `Process.flag(:trap_exit, true)`, so a Live-session crash becomes an `{:EXIT, …}` message it can report instead of a silent death.
+The primitive underneath is four steps — open a session, send the mic up, receive voice back, push it to the browser. `Socket` adds the persona, the tools, transcription, and `Process.flag(:trap_exit, true)`, so a session crash becomes an `{:EXIT, …}` message it can report instead of a silent death.
+
+What it does *not* do any more is know which API answered. [`LiveDJ.Provider`](lib/live_dj/provider.ex) is a behaviour over six neutral events:
+
+```
+{:voice, pcm}   :interrupted   {:transcript, :user | :mira, text}
+{:play, cmd}    {:error, _}    {:closed, _}
+```
+
+The two wire formats disagree about nearly everything — Gemini pushes typed structs through callbacks and takes audio by reference; xAI speaks a JSON event protocol and takes raw binary frames — so neither vocabulary makes a good lingua franca. Providers translate into the set above, and decoding is theirs: by the time a frame reaches the socket it is PCM, not base64 and not a struct.
+
+The behaviour has no `send_tool_result/3`, and that omission is load-bearing. `gemini_ex` wants a tool result as the callback's **return value**, synchronously, while the model's voice is paused; xAI wants two separate messages. No single signature fits both without being dead weight in one, so each provider dispatches through `LiveDJ.Tools` itself. The decision stays shared; only the handshake differs.
 
 ## The gotcha — and the one that vanished
 
@@ -78,8 +96,12 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 |---|---|
 | `lib/live_dj.ex` | `config/0` — the resolved model, voice, and port |
 | `lib/live_dj/application.ex` | starts Bandit on `PORT`, and nothing else |
-| `lib/live_dj/socket.ex` | the Gemini Live bridge + music-tool dispatch |
-| `lib/live_dj/live_session.ex` | the one upstream call, with its own timeout and `catch :exit` — a stalled Gemini must not take the listener down |
+| `lib/live_dj/socket.ex` | the bridge — provider-agnostic, six events wide |
+| `lib/live_dj/provider.ex` | the behaviour, and why it has no `send_tool_result/3` |
+| `lib/live_dj/provider/gemini.ex` | Gemini Live, through `gemini_ex` |
+| `lib/live_dj/provider/grok.ex` | xAI's Voice Agent, hand-rolled on `websockex` — no Elixir package speaks the OpenAI Realtime protocol |
+| `lib/live_dj/live_session.ex` | the one upstream Gemini call, with its own timeout and `catch :exit` — a stalled session must not take the listener down |
+| `priv/spike/` | the throwaway script that verified the xAI protocol against the live API before any of it was written |
 | `lib/live_dj/tools.ex` | `play_playlist` / `play_track` / `skip` / `pause` — they return **instantly**, so the voice never stalls |
 | `lib/live_dj/persona.ex` · `priv/assets/mira_persona.txt` | who Mira is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_dj/router.ex` | the WebSocket upgrade + static files + `/healthz` |
@@ -89,9 +111,9 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 
 The frontend is byte-identical to the Python original: the WebSocket contract did not change, so nothing needed porting.
 
-Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
+Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
 
-`gemini_ex` is pinned to the minor (`~> 0.17.0`, not `~> 0.17`). It is a 0.x library that has already moved the Live WebSocket transport once in a minor release, and `LiveDJ.Socket` pattern-matches its structs in function heads — so drift surfaces as a runtime `FunctionClauseError`, not a compile error.
+`gemini_ex` is pinned to the minor (`~> 0.17.0`, not `~> 0.17`). It is a 0.x library that has already moved the Live WebSocket transport once in a minor release, `LiveDJ.Provider.Gemini` pattern-matches its structs in function heads, and `LiveDJ.LiveSession` calls one of its internal messages directly — so drift surfaces as a runtime error, not a compile one.
 
 ## The HTTP surface
 
@@ -122,16 +144,18 @@ mix format --check-formatted
 mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-**49 tests, no network:**
+**77 tests, no network:**
 
 | | |
 |---|---|
-| `socket_test.exs` (21) | the whole bridge at the message-translation level — voice downstream, barge-in, transcripts, tool calls, upstream, the failure paths, and that an error frame never leaks the upstream reason to the browser |
+| `provider/grok_test.exs` (18) | xAI events in, neutral events out — binary voice and the base64 fallback, barge-in, transcripts, tool dispatch, and that the tool reply goes out by `cast`, because `WebSockex.send_frame/3` **raises** when the caller is the socket process |
+| `socket_test.exs` (14) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, plus a stub provider proving the upstream call goes through whichever one is configured |
+| `provider/gemini_test.exs` (13) | real `gemini_ex` structs in, neutral events out — the assertions that lived in `socket_test.exs` before the seam existed |
 | `tools_test.exs` (12) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, and the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work, and neither catches both |
 | `router_test.exs` (7) | `/healthz`, the 404 catch-all, the static client, the track catalogue and audio files — and that `priv/assets/mira_persona.txt` is **not** reachable over HTTP |
+| `live_dj_test.exs` (6) | `config/0` reads at call time so a boot-time override wins, the test VM asks the OS for a port, and `pt_BR` normalises to `pt-BR` |
 | `persona_test.exs` (4) | the instruction loads, carries both halves, names every callable tool, and is shaped as the `Content` the setup message expects |
 | `live_session_test.exs` (3) | a stalled or dead session comes back as `{:error, {:exit, _}}` and the caller stays alive — the guardrail on the one call that sits in the audio path |
-| `live_dj_test.exs` (2) | `config/0` reports the booted model, voice and port, and reads them at call time so a boot-time override wins |
 
 Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a dummy API key so config validation passes without one.
 
