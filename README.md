@@ -6,6 +6,8 @@ An Elixir port of [`live-dj`](../live-dj) — the demo from **EP1 of the Multimo
 
 ## Run it
 
+Requires Elixir `~> 1.17` (developed on 1.20 / OTP 29).
+
 ```bash
 cp .env.example .env          # paste your GOOGLE_API_KEY (Gemini Developer API / AI Studio, not Vertex)
 mix deps.get
@@ -17,6 +19,20 @@ SOCKET_HANDLER=minimal mix run --no-halt   # just the ~30-line primitive
 Open <http://localhost:8000>, **put headphones on** (otherwise she hears her own radio), tap 🎙 and talk.
 
 Try: *"hey Mira"* · *"can you play something dream pop"* · *"skip this"* — then **talk over her** while she's speaking.
+
+### Configuration
+
+`config/runtime.exs` ships a ten-line dotenv reader, so the Python repo's `.env` works unchanged and we skip a dependency. It only fills in variables that aren't already set — real deployments just set the environment.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | either name works; `gemini_ex` wants the second, the Python repo's `.env` has the first. Missing it warns at boot (except in `:test`). |
+| `LIVE_MODEL` | `gemini-3.1-flash-live-preview` | the Live model |
+| `LIVE_VOICE` | `Aoede` | Mira's **native Live** voice |
+| `PORT` | `8000` | the HTTP port |
+| `SOCKET_HANDLER` | `LiveDJ.Socket` | set to `minimal` to swap in `LiveDJ.Minimal` |
+
+`LiveDJ.config/0` reads the resolved values back out; `LiveDJ.Router` resolves the socket handler *per request*, so `SOCKET_HANDLER` needs no recompile.
 
 ## How it works
 
@@ -34,14 +50,18 @@ Browser ──ws──> Bandit ──> LiveDJ.Socket          (one process per b
 
 Where the Python version runs **two asyncio tasks** (mic up, audio down), the BEAM needs neither: the socket process *is* both directions. `handle_in/2` is upstream, `handle_info/2` is downstream, and the Live session is a linked GenServer pushing into our mailbox.
 
+`LiveDJ.Application` starts exactly one child — `{Bandit, plug: LiveDJ.Router, port: port}`. Bandit supervises the per-connection processes, so there is no hand-rolled supervision tree to get wrong.
+
 ## The two modules that matter
 
 | Module | What it is |
 |---|---|
 | [`LiveDJ.Minimal`](lib/live_dj/minimal.ex) | The entire primitive: open a session, send the mic, receive voice, play it. Nothing else. |
-| [`LiveDJ.Socket`](lib/live_dj/socket.ex) | The full app — the same bridge plus Mira's persona, music tools, transcripts, and barge-in. |
+| [`LiveDJ.Socket`](lib/live_dj/socket.ex) | The full app — the same bridge plus Mira's persona, music tools, transcripts, barge-in, and the failure paths. |
 
 Start with the minimal one. Everything that makes Mira *Mira* is the difference between those two files.
+
+The difference, concretely: `Socket` adds `system_instruction`, `tools`, input/output transcription, and the `on_transcription` / `on_error` / `on_close` / `on_tool_call` callbacks — plus `Process.flag(:trap_exit, true)`, so a Live-session crash becomes an `{:EXIT, …}` message it can report instead of a silent death.
 
 ## The gotcha — and the one that vanished
 
@@ -49,9 +69,9 @@ The Python original exists to teach a bug: `session.receive()` is a **per-turn**
 
 **That bug cannot be written in Elixir.** `Gemini.Live.Session` is a GenServer that *pushes* every server message through callbacks — there is no generator to exhaust and no loop to forget to restart. The actor model deletes the entire class of bug, which is good engineering and a worse demo.
 
-Its sibling **does** survive, in [`LiveDJ.Gotcha`](lib/live_dj/gotcha.ex): mic audio goes to `send_realtime_input`, **not** `send_client_content` — get that wrong and the model simply never hears you.
+Its sibling **does** survive, in [`LiveDJ.Gotcha`](lib/live_dj/gotcha.ex): mic audio goes to `send_realtime_input`, **not** `send_client_content` — get that wrong and the model simply never hears you. Both spellings are kept compilable there, side by side.
 
-And the rule that governs [`LiveDJ.Tools`](lib/live_dj/tools.ex): live function calls are **synchronous**, so the model's voice is paused until your tool returns. Every handler decides a command and returns instantly, never awaiting playback. `test/live_dj/tools_test.exs` fails if one starts doing real work.
+And the rule that governs [`LiveDJ.Tools`](lib/live_dj/tools.ex): live function calls are **synchronous**, so the model's voice is paused until your tool returns. `dispatch/2` is therefore a plain function over plain data — no GenServer call, no HTTP, no `Task.await`. It decides a command, hands it to the socket process, and returns `%{result: "ok"}` in the same breath. `test/live_dj/tools_test.exs` fails if one starts doing real work.
 
 ## Why no Phoenix
 
@@ -63,37 +83,70 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 
 | | |
 |---|---|
+| `lib/live_dj.ex` | `config/0` — the resolved model, voice, and port |
+| `lib/live_dj/application.ex` | starts Bandit on `PORT`, and nothing else |
 | `lib/live_dj/socket.ex` | the Gemini Live bridge + music-tool dispatch |
+| `lib/live_dj/live_session.ex` | the one upstream call, with its own timeout and `catch :exit` — a stalled Gemini must not take the listener down |
 | `lib/live_dj/minimal.ex` | the ~30-line voice-only extract |
 | `lib/live_dj/tools.ex` | `play_playlist` / `play_track` / `skip` / `pause` — they return **instantly**, so the voice never stalls |
-| `lib/live_dj/persona.ex` · `priv/assets/mira_persona.txt` | who Mira is |
+| `lib/live_dj/persona.ex` · `priv/assets/mira_persona.txt` | who Mira is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_dj/gotcha.ex` | the wrong-way/right-way example |
-| `lib/live_dj/router.ex` | the WebSocket upgrade + static files |
+| `lib/live_dj/router.ex` | the WebSocket upgrade + static files + `/healthz` |
+| `config/runtime.exs` | the `.env` reader, the API-key aliasing, and the `SOCKET_HANDLER` switch |
 | `priv/frontend/` | the browser client, **copied unchanged** from the Python repo |
-| `priv/assets/tracks/` | four dream-pop tracks |
+| `priv/assets/tracks/` · `priv/assets/tracks.json` | four dream-pop tracks and the catalogue the browser fetches |
 
 The frontend is byte-identical to the Python original: the WebSocket contract did not change, so nothing needed porting.
+
+Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
+
+`gemini_ex` is pinned to the minor (`~> 0.17.0`, not `~> 0.17`). It is a 0.x library that has already moved the Live WebSocket transport once in a minor release, and `LiveDJ.Socket` pattern-matches its structs in function heads — so drift surfaces as a runtime `FunctionClauseError`, not a compile error.
+
+## The HTTP surface
+
+| Route | |
+|---|---|
+| `GET /` · `GET /main.js` · `GET /pcm-processor.js` | the client, served from `priv/frontend` |
+| `GET /assets/*` | `tracks.json` and the four mp3s, from `priv/assets` |
+| `GET /healthz` | `200 ok` |
+| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame |
 
 ## The WebSocket contract
 
 `WS /ws` — unchanged from the Python server.
 
-- **Browser → server:** binary frames, 16 kHz mono PCM s16le.
+- **Browser → server:** binary frames, 16 kHz mono PCM s16le. Text frames are accepted and ignored; the contract reserves them for `{"type":"start"|"stop"}`, which the client doesn't send today.
 - **Server → browser:** binary frames of 24 kHz PCM (voice), plus JSON text frames:
   `{"type":"transcript","role":"user"|"mira","text":…}` ·
   `{"type":"play","action":"playlist"|"track"|"skip"|"pause","value":…}` ·
   `{"type":"interrupted"}` · `{"type":"error","message":…}`
 
+Empty transcripts are dropped rather than drawn as blank lines, and a text-only model part pushes nothing — this agent speaks, it does not type.
+
 ## Tests
 
 ```bash
 mix test
+mix format --check-formatted
+mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-35 tests, no network: `Tools` dispatch and the instant-return guardrail, `Persona` loading, and the whole bridge exercised at the message-translation level — real `gemini_ex` structs in, real WebSocket frames out.
+**46 tests, no network:**
+
+| | |
+|---|---|
+| `socket_test.exs` (21) | the whole bridge at the message-translation level — voice downstream, barge-in, transcripts, tool calls, upstream, the failure paths, and that an error frame never leaks the upstream reason to the browser |
+| `tools_test.exs` (11) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, and the instant-return guardrail |
+| `router_test.exs` (7) | `/healthz`, the 404 catch-all, the static client and track catalogue, and the `/ws` upgrade — including that `SOCKET_HANDLER` is resolved per request, not captured at init |
+| `persona_test.exs` (4) | the instruction loads, carries both halves, names every callable tool, and is shaped as the `Content` the setup message expects |
+| `live_session_test.exs` (3) | a stalled or dead session comes back as `{:error, {:exit, _}}` and the caller stays alive — the guardrail on the one call that sits in the audio path |
+
+Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a dummy API key so config validation passes without one.
 
 ## Notes
 
 - **Voice** is a Gemini Live *native* voice (`LIVE_VOICE`, default `Aoede`) — the Live API has its own voice set, so it can't reproduce a TTS voice you used elsewhere. The persona carries the character, not the timbre.
-- **Barge-in** is client-side: the browser cuts playback the instant the mic hears you (RMS gate in `priv/frontend/main.js`). The server forwards `interrupted` too.
+- **Barge-in** is client-side: the browser cuts playback the instant the mic hears you (RMS gate at `0.02` in `priv/frontend/main.js`). The server forwards `interrupted` too.
+- **Mic framing.** The worklet batches PCM into ~100 ms frames rather than emitting one per 128-sample render quantum — at 48 kHz that was 375 WebSocket frames/sec of ~85 bytes, where framing overhead dwarfed the audio. Barge-in can't wait for the batch, so a quantum that crosses the gate posts an RMS-only message immediately and the cut stays instant.
+- **Ducking** is client-side as well: the music drops to 12 % while Mira talks and comes back 450 ms after she stops.
 - **Concurrency** is where the port pays off. The Python design doc lists *"what breaks at 10× concurrent: one process holding N sessions saturates."* Here each listener is an isolated, supervised process; one dropped call never touches another.
