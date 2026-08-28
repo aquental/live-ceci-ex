@@ -9,30 +9,29 @@ defmodule LiveDJ.Router do
 
   use Plug.Router
 
-  # Mira's four dream-pop tracks and the catalogue the browser fetches.
-  plug(Plug.Static, at: "/assets", from: {:live_dj, "priv/assets"})
+  # Mira's four dream-pop tracks and the catalogue the browser fetches. `only:` is an
+  # allowlist, not a blocklist, because priv/assets also holds mira_persona.txt — the
+  # system prompt, which only the compiler reads. Anything added here stays private
+  # until it is named on this line.
+  plug Plug.Static, at: "/assets", from: {:live_dj, "priv/assets"}, only: ~w(tracks tracks.json)
 
   # index.html / main.js / pcm-processor.js
-  plug(Plug.Static, at: "/", from: {:live_dj, "priv/frontend"}, index: ["index.html"])
+  plug Plug.Static, at: "/", from: {:live_dj, "priv/frontend"}, index: ["index.html"]
 
-  plug(:match)
-  plug(:dispatch)
+  plug :match
+  plug :dispatch
 
   get "/ws" do
-    # Resolved at request time so SOCKET_HANDLER=minimal swaps in the stripped-down
-    # bridge without a recompile.
-    handler = Application.get_env(:live_dj, :socket_handler, LiveDJ.Socket)
-
     conn
-    |> WebSockAdapter.upgrade(handler, [], timeout: 60_000, max_frame_size: 1_000_000)
+    |> WebSockAdapter.upgrade(LiveDJ.Socket, [], timeout: 60_000, max_frame_size: 1_000_000)
     |> halt()
   end
 
-  get("/healthz", do: send_resp(conn, 200, "ok"))
+  get "/healthz", do: send_resp(conn, 200, "ok")
 
   get "/" do
     send_file(conn, 200, Path.join(:code.priv_dir(:live_dj), "frontend/index.html"))
   end
 
-  match(_, do: send_resp(conn, 404, "not found"))
+  match _, do: send_resp(conn, 404, "not found")
 end

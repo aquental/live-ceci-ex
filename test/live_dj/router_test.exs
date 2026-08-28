@@ -1,7 +1,5 @@
 defmodule LiveDJ.RouterTest do
-  # async: false — the SOCKET_HANDLER tests mutate :live_dj application env, which
-  # LiveDJ.Router reads at request time and every other process shares.
-  use ExUnit.Case, async: false
+  use ExUnit.Case, async: true
   import Plug.Test
   import Plug.Conn
 
@@ -52,39 +50,32 @@ defmodule LiveDJ.RouterTest do
       assert conn.status == 200
       assert [%{"title" => _, "file" => _} | _] = Jason.decode!(conn.resp_body)
     end
+
+    test "the audio files the player streams are still served" do
+      conn = call(conn(:get, "/assets/tracks/01-song.mp3"))
+
+      assert conn.status == 200
+    end
+
+    # priv/assets mixes two audiences: media the browser fetches, and mira_persona.txt,
+    # which only the compiler reads (LiveDJ.Persona inlines it via @external_resource).
+    # Plug.Static cannot tell them apart on its own, so the allowlist is what keeps the
+    # system prompt off the wire.
+    test "the persona prompt is not reachable over HTTP" do
+      conn = call(conn(:get, "/assets/mira_persona.txt"))
+
+      assert conn.status == 404
+      refute conn.resp_body =~ "midnight"
+    end
   end
 
   describe "/ws upgrade" do
-    test "upgrades to the configured socket handler with the framing limits" do
+    test "upgrades to the socket handler with the framing limits" do
       call(ws_conn())
 
       assert_receive {_ref, :upgrade, {:websocket, {LiveDJ.Socket, [], opts}}}
       assert opts[:timeout] == 60_000
       assert opts[:max_frame_size] == 1_000_000
-    end
-
-    test "SOCKET_HANDLER=minimal swaps the handler without a recompile" do
-      previous = Application.get_env(:live_dj, :socket_handler)
-      Application.put_env(:live_dj, :socket_handler, LiveDJ.Minimal)
-      on_exit(fn -> Application.put_env(:live_dj, :socket_handler, previous) end)
-
-      call(ws_conn())
-
-      assert_receive {_ref, :upgrade, {:websocket, {LiveDJ.Minimal, _, _}}}
-    end
-
-    test "the handler is resolved per request, not captured at init" do
-      previous = Application.get_env(:live_dj, :socket_handler)
-      on_exit(fn -> Application.put_env(:live_dj, :socket_handler, previous) end)
-
-      # @opts was built once, above — proving the swap is read at call time.
-      Application.put_env(:live_dj, :socket_handler, LiveDJ.Minimal)
-      call(ws_conn())
-      assert_receive {_ref, :upgrade, {:websocket, {LiveDJ.Minimal, _, _}}}
-
-      Application.put_env(:live_dj, :socket_handler, LiveDJ.Socket)
-      call(ws_conn())
-      assert_receive {_ref, :upgrade, {:websocket, {LiveDJ.Socket, _, _}}}
     end
   end
 end
