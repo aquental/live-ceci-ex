@@ -1,164 +1,72 @@
 defmodule LiveDJ.SocketTest do
   @moduledoc """
-  The bridge, tested at the message-translation level: real `gemini_ex` structs in,
-  real WebSocket frames out. No browser automation, no live session — the seam is
-  `handle_info/2` and `handle_tool_call/2`, which is where every wire-contract bug
-  the frontend can see actually lives.
+  The bridge, tested at the message-translation level: provider events in, real
+  WebSocket frames out. No browser automation, no live session — the seam is
+  `handle_info/2`, which is where every wire-contract bug the frontend can see
+  actually lives.
+
+  Nothing here mentions Gemini or Grok. That is the point: the socket sees only the
+  neutral events in `LiveDJ.Provider`, and each provider's own translation is tested
+  against its own wire format in `test/live_dj/provider/`.
   """
   use ExUnit.Case, async: true
 
-  alias Gemini.Types.Live.{ServerContent, ServerMessage, ToolCall}
   alias LiveDJ.Socket
 
-  # 24 kHz PCM arrives base64-encoded inside the model turn's parts.
   @pcm <<1, 0, 2, 0, 3, 0, 255, 127>>
 
-  defp state, do: %{session: nil}
-
-  defp audio_message(pcm) do
-    %ServerMessage{
-      server_content: %ServerContent{
-        model_turn: %{
-          role: "model",
-          parts: [
-            %{inline_data: %{"data" => Base.encode64(pcm), "mimeType" => "audio/pcm;rate=24000"}}
-          ]
-        }
-      }
-    }
-  end
+  defp state, do: %{session: nil, provider: LiveDJ.Provider.Gemini}
 
   describe "voice downstream" do
-    test "model audio is decoded and pushed as a binary frame" do
+    test "voice is pushed as a binary frame, unchanged" do
       assert {:push, [{:binary, pcm}], _state} =
-               Socket.handle_info({:gemini, audio_message(@pcm)}, state())
+               Socket.handle_info({:provider, {:voice, @pcm}}, state())
 
       assert pcm == @pcm
     end
 
-    test "several parts in one turn become several frames, in order" do
-      message = %ServerMessage{
-        server_content: %ServerContent{
-          model_turn: %{
-            role: "model",
-            parts: [
-              %{inline_data: %{"data" => Base.encode64(<<1, 0>>), "mimeType" => "audio/pcm"}},
-              %{inline_data: %{"data" => Base.encode64(<<2, 0>>), "mimeType" => "audio/pcm"}}
-            ]
-          }
-        }
-      }
+    test "each voice event is its own frame, so ordering is the mailbox's ordering" do
+      assert {:push, [{:binary, <<1, 0>>}], s1} =
+               Socket.handle_info({:provider, {:voice, <<1, 0>>}}, state())
 
-      assert {:push, [{:binary, <<1, 0>>}, {:binary, <<2, 0>>}], _state} =
-               Socket.handle_info({:gemini, message}, state())
-    end
-
-    test "a text-only part pushes nothing — this agent speaks, it does not type" do
-      message = %ServerMessage{
-        server_content: %ServerContent{model_turn: %{role: "model", parts: [%{text: "hi"}]}}
-      }
-
-      assert {:ok, _state} = Socket.handle_info({:gemini, message}, state())
-    end
-
-    test "turn_complete alone is not forwarded" do
-      message = %ServerMessage{server_content: %ServerContent{turn_complete: true}}
-      assert {:ok, _state} = Socket.handle_info({:gemini, message}, state())
-    end
-
-    test "setup_complete is not forwarded" do
-      message = %ServerMessage{setup_complete: %Gemini.Types.Live.SetupComplete{}}
-      assert {:ok, _state} = Socket.handle_info({:gemini, message}, state())
+      assert {:push, [{:binary, <<2, 0>>}], _s2} =
+               Socket.handle_info({:provider, {:voice, <<2, 0>>}}, s1)
     end
   end
 
   describe "barge-in" do
     test "interrupted becomes the JSON the frontend cuts playback on" do
-      message = %ServerMessage{server_content: %ServerContent{interrupted: true}}
-
-      assert {:push, [{:text, json}], _state} = Socket.handle_info({:gemini, message}, state())
-      assert Jason.decode!(json) == %{"type" => "interrupted"}
-    end
-
-    test "voice and interruption in the same message both go out" do
-      message = put_in(audio_message(@pcm).server_content.interrupted, true)
-
-      assert {:push, [{:binary, _pcm}, {:text, json}], _state} =
-               Socket.handle_info({:gemini, message}, state())
+      assert {:push, [{:text, json}], _state} =
+               Socket.handle_info({:provider, :interrupted}, state())
 
       assert Jason.decode!(json) == %{"type" => "interrupted"}
     end
   end
 
   describe "transcripts" do
-    test "input transcription is labelled as the user" do
+    test "a user transcript is labelled as the user" do
       assert {:push, [{:text, json}], _state} =
-               Socket.handle_info(
-                 {:transcription, {:input, %{"text" => "play something"}}},
-                 state()
-               )
+               Socket.handle_info({:provider, {:transcript, :user, "play something"}}, state())
 
       assert %{"type" => "transcript", "role" => "user", "text" => "play something"} =
                Jason.decode!(json)
     end
 
-    test "output transcription is labelled as mira" do
+    test "a model transcript is labelled as mira" do
       assert {:push, [{:text, json}], _state} =
-               Socket.handle_info({:transcription, {:output, %{"text" => "sure"}}}, state())
+               Socket.handle_info({:provider, {:transcript, :mira, "sure"}}, state())
 
       assert %{"type" => "transcript", "role" => "mira", "text" => "sure"} = Jason.decode!(json)
     end
-
-    test "empty transcripts are dropped rather than drawn as blank lines" do
-      assert {:ok, _state} =
-               Socket.handle_info({:transcription, {:output, %{"text" => ""}}}, state())
-    end
   end
 
-  describe "tool calls" do
-    test "a play_playlist call sends the browser a command AND answers the model instantly" do
-      tool_call = %ToolCall{
-        function_calls: [%{id: "call_1", name: "play_playlist", args: %{"mood" => "dream pop"}}]
-      }
-
-      assert {:tool_response, [%{id: "call_1", name: "play_playlist", response: %{result: "ok"}}]} =
-               Socket.handle_tool_call(tool_call, self())
-
-      assert_received {:play, %{action: "playlist", value: "dream pop"}}
-    end
-
-    test "several calls in one batch are all dispatched, in order" do
-      tool_call = %ToolCall{
-        function_calls: [
-          %{id: "a", name: "play_playlist", args: %{"mood" => "lofi"}},
-          %{id: "b", name: "skip", args: %{}}
-        ]
-      }
-
-      assert {:tool_response, [%{id: "a"}, %{id: "b"}]} =
-               Socket.handle_tool_call(tool_call, self())
-
-      assert_received {:play, %{action: "playlist", value: "lofi"}}
-      assert_received {:play, %{action: "skip"}}
-    end
-
-    test "an unknown tool still answers the model, but emits no play command" do
-      tool_call = %ToolCall{function_calls: [%{id: "x", name: "teleport", args: %{}}]}
-
-      assert {:tool_response, [%{id: "x", response: %{result: "unknown tool: teleport"}}]} =
-               Socket.handle_tool_call(tool_call, self())
-
-      refute_received {:play, _command}
-    end
-
-    test "nil args do not crash the turn" do
-      tool_call = %ToolCall{function_calls: [%{id: "y", name: "skip", args: nil}]}
-      assert {:tool_response, [%{id: "y"}]} = Socket.handle_tool_call(tool_call, self())
-    end
-
+  describe "tool commands" do
     test "the play command reaches the browser as the frontend's play message" do
       assert {:push, [{:text, json}], _state} =
-               Socket.handle_info({:play, %{action: "track", value: "porcelain"}}, state())
+               Socket.handle_info(
+                 {:provider, {:play, %{action: "track", value: "porcelain"}}},
+                 state()
+               )
 
       assert %{"type" => "play", "action" => "track", "value" => "porcelain"} =
                Jason.decode!(json)
@@ -168,7 +76,7 @@ defmodule LiveDJ.SocketTest do
   describe "failure paths" do
     test "a session error is reported to the browser instead of dying silently" do
       assert {:push, [{:text, json}], _state} =
-               Socket.handle_info({:gemini_error, :boom}, state())
+               Socket.handle_info({:provider, {:error, :boom}}, state())
 
       assert %{"type" => "error", "message" => message} = Jason.decode!(json)
       assert message == "the line dropped — try again"
@@ -178,19 +86,25 @@ defmodule LiveDJ.SocketTest do
       reason = {:http_error, 403, "API key not valid: AIzaSyFAKE"}
 
       assert {:push, [{:text, json}], _state} =
-               Socket.handle_info({:gemini_error, reason}, state())
+               Socket.handle_info({:provider, {:error, reason}}, state())
 
       refute json =~ "AIzaSyFAKE"
       refute json =~ "403"
     end
 
     test "a closed session stops the socket normally" do
-      assert {:stop, :normal, _state} = Socket.handle_info({:gemini_closed, :normal}, state())
+      assert {:stop, :normal, _state} =
+               Socket.handle_info({:provider, {:closed, :normal}}, state())
     end
 
     test "a crashed session process stops the socket instead of taking it down silently" do
       pid = self()
-      assert {:stop, :normal, _state} = Socket.handle_info({:EXIT, pid, :killed}, %{session: pid})
+
+      assert {:stop, :normal, _state} =
+               Socket.handle_info({:EXIT, pid, :killed}, %{
+                 session: pid,
+                 provider: LiveDJ.Provider.Gemini
+               })
     end
 
     test "unknown messages are ignored" do
@@ -201,6 +115,32 @@ defmodule LiveDJ.SocketTest do
   describe "upstream" do
     test "text frames are accepted and ignored — the contract reserves them" do
       assert {:ok, _state} = Socket.handle_in({~s({"type":"start"}), [opcode: :text]}, state())
+    end
+
+    test "audio goes through the configured provider, whichever it is" do
+      defmodule RecordingProvider do
+        @behaviour LiveDJ.Provider
+        def open(_opts), do: {:ok, self()}
+        def send_audio(_session, pcm), do: send(self(), {:sent, pcm}) && :ok
+        def close(_session), do: :ok
+      end
+
+      state = %{session: self(), provider: RecordingProvider}
+      assert {:ok, _state} = Socket.handle_in({@pcm, [opcode: :binary]}, state)
+      assert_received {:sent, @pcm}
+    end
+
+    test "a provider that fails to send does not take the socket down" do
+      defmodule FailingProvider do
+        @behaviour LiveDJ.Provider
+        def open(_opts), do: {:ok, self()}
+        def send_audio(_session, _pcm), do: {:error, {:exit, {:timeout, :whatever}}}
+        def close(_session), do: :ok
+      end
+
+      state = %{session: self(), provider: FailingProvider}
+      assert {:ok, _state} = Socket.handle_in({@pcm, [opcode: :binary]}, state)
+      assert Process.alive?(self())
     end
   end
 end
