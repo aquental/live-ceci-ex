@@ -15,7 +15,6 @@ defmodule LiveDJ do
     * `LiveDJ.Tools`   — the music-control function calls (they return instantly)
     * `LiveDJ.Persona` — who Mira is
     * `LiveDJ.Router`  — the WebSocket upgrade + static files
-    * `LiveDJ.Gotcha`  — the wrong-way/right-way example, kept runnable
   """
 
   @doc """
