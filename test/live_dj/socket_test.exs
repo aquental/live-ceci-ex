@@ -170,7 +170,18 @@ defmodule LiveDJ.SocketTest do
       assert {:push, [{:text, json}], _state} =
                Socket.handle_info({:gemini_error, :boom}, state())
 
-      assert %{"type" => "error", "message" => ":boom"} = Jason.decode!(json)
+      assert %{"type" => "error", "message" => message} = Jason.decode!(json)
+      assert message == "the line dropped — try again"
+    end
+
+    test "the error frame does not leak the upstream reason to the browser" do
+      reason = {:http_error, 403, "API key not valid: AIzaSyFAKE"}
+
+      assert {:push, [{:text, json}], _state} =
+               Socket.handle_info({:gemini_error, reason}, state())
+
+      refute json =~ "AIzaSyFAKE"
+      refute json =~ "403"
     end
 
     test "a closed session stops the socket normally" do

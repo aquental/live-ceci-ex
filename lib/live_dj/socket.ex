@@ -77,7 +77,10 @@ defmodule LiveDJ.Socket do
     else
       {:error, reason} ->
         Logger.error("failed to open Live session: #{inspect(reason)}")
-        {:push, error_frame(reason), %{session: nil}}
+        # Close, don't linger. A socket left alive with session: nil sends every later
+        # binary frame into the no-op clause below, and the browser's continuous mic
+        # traffic keeps resetting the idle timeout — so it would never close on its own.
+        {:stop, :normal, 1011, error_frame(reason), %{session: nil}}
     end
   end
 
@@ -88,7 +91,9 @@ defmodule LiveDJ.Socket do
     # THE GOTCHA THAT SURVIVES: live mic audio is a STREAM, so it goes to
     # send_realtime_input. send_client_content is only for seeding history before
     # the conversation — use it for the mic and the turn never fires. Dead air.
-    case Session.send_realtime_input(session, audio: Audio.create_input_blob(pcm)) do
+    # ...through a wrapper, because the underlying call is a GenServer.call whose
+    # timeout would exit *this* process. See LiveDJ.LiveSession.
+    case LiveDJ.LiveSession.send_audio(session, pcm) do
       :ok ->
         {:ok, state}
 
@@ -190,8 +195,11 @@ defmodule LiveDJ.Socket do
   defp transcript_role(:input), do: "user"
   defp transcript_role(:output), do: "mira"
 
-  defp error_frame(reason) do
-    json(%{type: "error", message: inspect(reason)})
+  # The browser is untrusted, and an upstream reason can carry quota/billing state or a
+  # URL with the API key in it. The detail stays in the log — both call sites log it —
+  # and the client gets a fixed string.
+  defp error_frame(_reason) do
+    json(%{type: "error", message: "the line dropped — try again"})
   end
 
   # WebSock takes a list of frames; keeping every builder list-shaped makes them
