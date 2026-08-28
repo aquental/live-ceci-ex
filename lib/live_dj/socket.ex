@@ -18,7 +18,8 @@ defmodule LiveDJ.Socket do
   forget to restart. The lesson survives only as this note.
 
   Its sibling gotcha does survive: mic audio goes to `send_realtime_input/2`, NOT
-  `send_client_content/3`. See `LiveDJ.Gotcha`.
+  `send_client_content/3` — live audio is a stream, not a discrete turn, and the wrong
+  one leaves the model never hearing you. See `handle_in/2`.
 
   ## The wire contract (identical to the Python server, so the frontend is unchanged)
 
@@ -56,6 +57,17 @@ defmodule LiveDJ.Socket do
       },
       input_audio_transcription: %{},
       output_audio_transcription: %{},
+      # Gemini closes a turn on its own once it hears enough silence, and until it does,
+      # nothing comes back. Left unset it uses Google's default, which is undocumented
+      # here and long enough to feel like a stall on short utterances. Measured for
+      # contrast: with a text turn — where the turn closes on send and no detection runs —
+      # first audio comes back in ~900 ms.
+      realtime_input_config: %{
+        automatic_activity_detection: %{
+          silence_duration_ms: 500,
+          end_of_speech_sensitivity: :high
+        }
+      },
       on_message: &send(owner, {:gemini, &1}),
       on_transcription: &send(owner, {:transcription, &1}),
       on_error: &send(owner, {:gemini_error, &1}),
