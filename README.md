@@ -12,8 +12,7 @@ Requires Elixir `~> 1.17` (developed on 1.20 / OTP 29).
 cp .env.example .env          # paste your GOOGLE_API_KEY (Gemini Developer API / AI Studio, not Vertex)
 mix deps.get
 
-mix run --no-halt                          # the full DJ
-SOCKET_HANDLER=minimal mix run --no-halt   # just the ~30-line primitive
+mix run --no-halt
 ```
 
 Open <http://localhost:8000>, **put headphones on** (otherwise she hears her own radio), tap 🎙 and talk.
@@ -30,9 +29,8 @@ Try: *"hey Mira"* · *"can you play something dream pop"* · *"skip this"* — t
 | `LIVE_MODEL` | `gemini-3.1-flash-live-preview` | the Live model |
 | `LIVE_VOICE` | `Aoede` | Mira's **native Live** voice |
 | `PORT` | `8000` | the HTTP port |
-| `SOCKET_HANDLER` | `LiveDJ.Socket` | set to `minimal` to swap in `LiveDJ.Minimal` |
 
-`LiveDJ.config/0` reads the resolved values back out; `LiveDJ.Router` resolves the socket handler *per request*, so `SOCKET_HANDLER` needs no recompile.
+`LiveDJ.config/0` reads the resolved values back out, at call time — so what `runtime.exs` writes at boot is what the session opens with.
 
 ## How it works
 
@@ -52,16 +50,11 @@ Where the Python version runs **two asyncio tasks** (mic up, audio down), the BE
 
 `LiveDJ.Application` starts exactly one child — `{Bandit, plug: LiveDJ.Router, port: port}`. Bandit supervises the per-connection processes, so there is no hand-rolled supervision tree to get wrong.
 
-## The two modules that matter
+## The module that matters
 
-| Module | What it is |
-|---|---|
-| [`LiveDJ.Minimal`](lib/live_dj/minimal.ex) | The entire primitive: open a session, send the mic, receive voice, play it. Nothing else. |
-| [`LiveDJ.Socket`](lib/live_dj/socket.ex) | The full app — the same bridge plus Mira's persona, music tools, transcripts, barge-in, and the failure paths. |
+[`LiveDJ.Socket`](lib/live_dj/socket.ex) is the whole app: one browser socket in, one Gemini Live session out, and everything that makes Mira *Mira* layered on top of that single bridge.
 
-Start with the minimal one. Everything that makes Mira *Mira* is the difference between those two files.
-
-The difference, concretely: `Socket` adds `system_instruction`, `tools`, input/output transcription, and the `on_transcription` / `on_error` / `on_close` / `on_tool_call` callbacks — plus `Process.flag(:trap_exit, true)`, so a Live-session crash becomes an `{:EXIT, …}` message it can report instead of a silent death.
+The primitive underneath is four steps — open a session, send the mic up, receive voice back, push it to the browser. `Socket` adds `system_instruction`, `tools`, input/output transcription, and the `on_transcription` / `on_error` / `on_close` / `on_tool_call` callbacks — plus `Process.flag(:trap_exit, true)`, so a Live-session crash becomes an `{:EXIT, …}` message it can report instead of a silent death.
 
 ## The gotcha — and the one that vanished
 
@@ -69,7 +62,7 @@ The Python original exists to teach a bug: `session.receive()` is a **per-turn**
 
 **That bug cannot be written in Elixir.** `Gemini.Live.Session` is a GenServer that *pushes* every server message through callbacks — there is no generator to exhaust and no loop to forget to restart. The actor model deletes the entire class of bug, which is good engineering and a worse demo.
 
-Its sibling **does** survive, in [`LiveDJ.Gotcha`](lib/live_dj/gotcha.ex): mic audio goes to `send_realtime_input`, **not** `send_client_content` — get that wrong and the model simply never hears you. Both spellings are kept compilable there, side by side.
+Its sibling **does** survive, in [`LiveDJ.Socket`](lib/live_dj/socket.ex): mic audio goes to `send_realtime_input`, **not** `send_client_content`. `send_client_content` is for seeding history before the conversation; point the mic at it and the live turn never fires, so you get dead air.
 
 And the rule that governs [`LiveDJ.Tools`](lib/live_dj/tools.ex): live function calls are **synchronous**, so the model's voice is paused until your tool returns. `dispatch/2` is therefore a plain function over plain data — no GenServer call, no HTTP, no `Task.await`. It decides a command, hands it to the socket process, and returns `%{result: "ok"}` in the same breath. `test/live_dj/tools_test.exs` fails if one starts doing real work.
 
@@ -87,12 +80,10 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `lib/live_dj/application.ex` | starts Bandit on `PORT`, and nothing else |
 | `lib/live_dj/socket.ex` | the Gemini Live bridge + music-tool dispatch |
 | `lib/live_dj/live_session.ex` | the one upstream call, with its own timeout and `catch :exit` — a stalled Gemini must not take the listener down |
-| `lib/live_dj/minimal.ex` | the ~30-line voice-only extract |
 | `lib/live_dj/tools.ex` | `play_playlist` / `play_track` / `skip` / `pause` — they return **instantly**, so the voice never stalls |
 | `lib/live_dj/persona.ex` · `priv/assets/mira_persona.txt` | who Mira is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
-| `lib/live_dj/gotcha.ex` | the wrong-way/right-way example |
 | `lib/live_dj/router.ex` | the WebSocket upgrade + static files + `/healthz` |
-| `config/runtime.exs` | the `.env` reader, the API-key aliasing, and the `SOCKET_HANDLER` switch |
+| `config/runtime.exs` | the `.env` reader and the API-key aliasing |
 | `priv/frontend/` | the browser client, **copied unchanged** from the Python repo |
 | `priv/assets/tracks/` · `priv/assets/tracks.json` | four dream-pop tracks and the catalogue the browser fetches |
 
@@ -131,15 +122,16 @@ mix format --check-formatted
 mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-**46 tests, no network:**
+**49 tests, no network:**
 
 | | |
 |---|---|
 | `socket_test.exs` (21) | the whole bridge at the message-translation level — voice downstream, barge-in, transcripts, tool calls, upstream, the failure paths, and that an error frame never leaks the upstream reason to the browser |
-| `tools_test.exs` (11) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, and the instant-return guardrail |
-| `router_test.exs` (7) | `/healthz`, the 404 catch-all, the static client and track catalogue, and the `/ws` upgrade — including that `SOCKET_HANDLER` is resolved per request, not captured at init |
+| `tools_test.exs` (12) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, and the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work, and neither catches both |
+| `router_test.exs` (7) | `/healthz`, the 404 catch-all, the static client, the track catalogue and audio files — and that `priv/assets/mira_persona.txt` is **not** reachable over HTTP |
 | `persona_test.exs` (4) | the instruction loads, carries both halves, names every callable tool, and is shaped as the `Content` the setup message expects |
 | `live_session_test.exs` (3) | a stalled or dead session comes back as `{:error, {:exit, _}}` and the caller stays alive — the guardrail on the one call that sits in the audio path |
+| `live_dj_test.exs` (2) | `config/0` reports the booted model, voice and port, and reads them at call time so a boot-time override wins |
 
 Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a dummy API key so config validation passes without one.
 
