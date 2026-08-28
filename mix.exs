@@ -31,8 +31,14 @@ defmodule LiveDJ.MixProject do
       {:websock_adapter, "~> 0.5"},
 
       # Gemini Live API — Gemini.Live.Session is a GenServer over the Bidi WebSocket.
-      {:gemini_ex, "~> 0.17"},
-      {:jason, "~> 1.4"}
+      # Pinned to the minor: "~> 0.17" would allow anything under 1.0, and 0.16.0 already
+      # swapped the Live WebSocket transport once. LiveDJ.Socket pattern-matches
+      # Gemini.Types.Live.* in function heads, so drift is a runtime error, not a compile one.
+      {:gemini_ex, "~> 0.17.0"},
+      {:jason, "~> 1.4"},
+
+      # mix hex.audit only reads maintainer retirement flags; this checks the advisory DB.
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 end

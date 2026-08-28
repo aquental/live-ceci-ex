@@ -1,0 +1,16 @@
+# The key lives in .env — it is gitignored, but COPY . . does not read .gitignore.
+.env
+
+.git/
+.gitignore
+_build/
+deps/
+cover/
+doc/
+.elixir_ls/
+.lexical/
+.claude/
+erl_crash.dump
+*.ez
+*.beam
+config/*.secret.exs
