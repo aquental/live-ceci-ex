@@ -11,9 +11,10 @@ defmodule LiveCeci.Application do
 
     children = [
       # Before Bandit: the ticket table has to exist before the first upgrade can ask
-      # about it.
+      # about it, and the clinic snapshot has to exist before the first tool call.
       LiveCeci.Tickets,
       LiveCeci.Sessions,
+      LiveCeci.Data,
       {
         Bandit,
         # ThousandIsland defaults to send_timeout: 30_000 (transports/tcp.ex:24). Thirty

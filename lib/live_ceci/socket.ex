@@ -47,7 +47,7 @@ defmodule LiveCeci.Socket do
     `{"type":"end_of_speech"}`   the client's gate says the turn is over (manual mode)
   Server -> browser: binary frames of 24 kHz PCM (voice), plus JSON text frames:
     `{"type":"transcript","role":"user"|"ceci","text":...}`
-    `{"type":"action","action":"agendar"|"presenca"|"recibo"|"resumo","detail":...}`
+    `{"type":"action","action":"agendar"|"presenca"|"recibo"|"resumo"|"pacientes"|"sessoes"|"fechamento","detail":...}`
     `{"type":"interrupted"}`
     `{"type":"error","message":...}`
   """

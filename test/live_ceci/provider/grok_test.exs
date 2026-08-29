@@ -131,7 +131,7 @@ defmodule LiveCeci.Provider.GrokTest do
                  arguments: "{not json"
                })
 
-      assert_received {:provider, {:action, %{action: "resumo", detail: ""}}}
+      refute_received {:provider, {:action, _}}
     end
 
     test "the reply is a cast, not a direct send_frame" do
@@ -241,7 +241,7 @@ defmodule LiveCeci.Provider.GrokTest do
       assert Enum.all?(s.tools, &(&1.name && &1.description && &1.parameters))
 
       assert Enum.map(s.tools, & &1.name) |> Enum.sort() ==
-               ["agendar_sessao", "confirmar_presenca", "emitir_recibo", "resumo_mensal"]
+               Enum.sort(Enum.map(LiveCeci.Tools.declarations(), & &1.name))
     end
 
     test "the persona goes as a bare string, not Gemini's Content struct", %{session: s} do

@@ -97,12 +97,42 @@ defmodule LiveCeci.Tools do
     },
     %{
       name: "resumo_mensal",
-      description: "Fecha o resumo do mês para o contador: sessões, faltas e recebimentos.",
+      description:
+        "Lista a prévia do que seria enviado ao contador neste mês: sessões, faltas e " <>
+          "recebimentos. Não fecha o mês.",
       parameters: %{
         type: "object",
         properties: %{
           mes: %{type: "string", description: "o mês pedido, ex.: 'agosto' ou 'este mês'"}
-        }
+        },
+        required: ["mes"]
+      }
+    },
+    %{
+      name: "listar_pacientes",
+      description:
+        "Lista os pacientes do consultório por iniciais ou apelido. Use quando pedirem " <>
+          "quem são os pacientes, a lista, ou os apelidos.",
+      parameters: %{type: "object", properties: %{}}
+    },
+    %{
+      name: "listar_sessoes_hoje",
+      description:
+        "Lista as sessões de hoje, com apelido e horário. Use quando pedirem a agenda " <>
+          "de hoje ou quem vem hoje.",
+      parameters: %{type: "object", properties: %{}}
+    },
+    %{
+      name: "fechar_mes",
+      description:
+        "Fecha o mês e encaminha os dados ao contador. Só chamar depois que a pessoa " <>
+          "confirmou em voz alta que quer fechar e encaminhar ao contador.",
+      parameters: %{
+        type: "object",
+        properties: %{
+          mes: %{type: "string", description: "o mês a fechar, ex.: 'agosto'"}
+        },
+        required: ["mes"]
       }
     }
   ]
@@ -129,9 +159,10 @@ defmodule LiveCeci.Tools do
   activity panel. `function_result` is handed straight back to the model — instantly,
   never blocking.
 
-  Nothing here is persisted. These are stubs: the POC proves the voice loop, and a real
-  booking would have to go somewhere other than this function. The result string is what
-  the model reads back, so it says what happened, not that it succeeded.
+  Booking, attendance and receipt tools are still stubs. The listing and month-close
+  tools read (and for `fechar_mes`, replace) the in-memory snapshot via
+  `LiveCeci.Data.get_data/0` — an ETS lookup, never a `GenServer.call`. The result
+  string is what the model reads back, so it says what happened, not that it succeeded.
   """
   @spec dispatch(String.t(), map()) :: {action(), map()}
   def dispatch("agendar_sessao", args) do
@@ -167,10 +198,72 @@ defmodule LiveCeci.Tools do
     end)
   end
 
-  # The only tool with nothing required: "fecha o resumo" with no month is a fair request.
   def dispatch("resumo_mensal", args) do
     mes = arg(args, :mes)
-    {%{action: "resumo", detail: mes}, %{result: "resumo fechado"}}
+
+    complete([mes: mes], fn ->
+      case LiveCeci.Clinic.preview_month(LiveCeci.Data.get_data(), mes) do
+        %{status: "closed"} = preview ->
+          {%{action: "resumo", detail: mes},
+           %{result: "esse mês já está fechado — #{speak_preview(preview)}"}}
+
+        %{} = preview ->
+          {%{action: "resumo", detail: mes}, %{result: speak_preview(preview)}}
+
+        nil ->
+          {nil, %{result: "mês desconhecido — pergunte de novo"}}
+      end
+    end)
+  end
+
+  def dispatch("listar_pacientes", _args) do
+    apelidos =
+      LiveCeci.Data.get_data()
+      |> LiveCeci.Clinic.patients()
+      |> Enum.map(& &1["apelido"])
+      |> join()
+
+    result = if apelidos == "", do: "nenhum paciente", else: apelidos
+    {%{action: "pacientes", detail: apelidos}, %{result: result}}
+  end
+
+  def dispatch("listar_sessoes_hoje", _args) do
+    data = LiveCeci.Data.get_data()
+    by_id = Map.new(LiveCeci.Clinic.patients(data), &{&1["id"], &1["apelido"]})
+
+    spoken =
+      data
+      |> LiveCeci.Clinic.sessions_on(LiveCeci.Clock.today())
+      |> Enum.sort_by(& &1["time"])
+      |> Enum.map(fn session ->
+        "#{by_id[session["patient_id"]]} #{clock_hour(session["time"])}"
+      end)
+      |> join()
+
+    result = if spoken == "", do: "nenhuma sessão hoje", else: spoken
+    {%{action: "sessoes", detail: spoken}, %{result: result}}
+  end
+
+  def dispatch("fechar_mes", args) do
+    mes = arg(args, :mes)
+
+    complete([mes: mes], fn ->
+      data = LiveCeci.Data.get_data()
+
+      case LiveCeci.Clinic.close_month(data, mes) do
+        {:ok, new_data} ->
+          LiveCeci.Data.put_data(new_data)
+
+          {%{action: "fechamento", detail: mes},
+           %{result: "mês fechado, dados encaminhados ao contador"}}
+
+        {:error, :already_closed} ->
+          {nil, %{result: "esse mês já está fechado"}}
+
+        {:error, :unknown_month} ->
+          {nil, %{result: "mês desconhecido — pergunte de novo"}}
+      end
+    end)
   end
 
   def dispatch(name, _args), do: {nil, %{result: "unknown tool: #{name}"}}
@@ -274,4 +367,13 @@ defmodule LiveCeci.Tools do
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" · ")
   end
+
+  defp speak_preview(%{mes: mes, sessoes: sessoes, faltas: faltas, recebimentos: recebimentos}) do
+    "#{mes}: #{sessoes} sessões, #{faltas} faltas, #{recebimentos} recebimentos"
+  end
+
+  defp clock_hour(<<h::binary-size(2), ":00">>), do: h <> "h"
+  defp clock_hour(<<h::binary-size(2), ":", m::binary-size(2)>>), do: h <> "h" <> m
+  defp clock_hour(other) when is_binary(other), do: other
+  defp clock_hour(_), do: ""
 end

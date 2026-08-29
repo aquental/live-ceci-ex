@@ -13,7 +13,7 @@ defmodule LiveCeci do
   The pieces:
 
     * `LiveCeci.Socket`  — the bridge: one browser socket, one Live session
-    * `LiveCeci.Tools`   — the four operational function calls (they return instantly)
+    * `LiveCeci.Tools`   — the operational function calls (they return instantly)
     * `LiveCeci.Persona` — who Ceci is
     * `LiveCeci.Router`  — the WebSocket upgrade + static files
   """

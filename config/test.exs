@@ -8,4 +8,7 @@ config :gemini_ex, api_key: "test-key"
 # 0 asks the OS for a free port. The test VM still boots the full app — Bandit
 # included — so a fixed port makes `mix test` fail with :eaddrinuse whenever the
 # dev server is already running, a failure that has nothing to do with the code.
-config :live_ceci, port: 0
+config :live_ceci,
+  port: 0,
+  clinic_source: {:map, %{"patients" => [], "sessions" => [], "receipts" => [], "months" => %{}}},
+  today: ~D[2026-08-15]

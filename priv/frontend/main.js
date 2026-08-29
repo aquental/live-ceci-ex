@@ -44,10 +44,13 @@ function addLine(role, text) {
 // side that the round trip happened: her voice says she booked it, this says the call
 // actually came back. Nothing is persisted — these are stubs on the server too.
 const ACTIONS = {
-  agendar:  "agendou",
-  presenca: "registrou presença",
-  recibo:   "emitiu recibo",
-  resumo:   "fechou o resumo",
+  agendar:     "agendou",
+  presenca:    "registrou presença",
+  recibo:      "emitiu recibo",
+  resumo:      "prévia do mês",
+  pacientes:   "listou pacientes",
+  sessoes:     "sessões de hoje",
+  fechamento:  "fechou o mês",
 };
 const MAX_ACTIONS = 20;
 function handleAction(cmd) {

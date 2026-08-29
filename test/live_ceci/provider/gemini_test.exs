@@ -230,10 +230,12 @@ defmodule LiveCeci.Provider.GeminiTest do
 
     test "on_tool_call dispatches and answers the model", %{opts: o} do
       call = %ToolCall{
-        function_calls: [%{id: "1", name: "resumo_mensal", args: %{"mes" => "2026-08"}}]
+        function_calls: [
+          %{id: "1", name: "emitir_recibo", args: %{"paciente" => "M.S.", "valor" => "250"}}
+        ]
       }
 
-      assert {:tool_response, [%{id: "1", name: "resumo_mensal"}]} = o[:on_tool_call].(call)
+      assert {:tool_response, [%{id: "1", name: "emitir_recibo"}]} = o[:on_tool_call].(call)
       assert_received {:provider, {:action, _command}}
     end
   end
@@ -331,7 +333,7 @@ defmodule LiveCeci.Provider.GeminiTest do
             name: "confirmar_presenca",
             args: %{"paciente" => "R.L.", "status" => "faltou"}
           },
-          %{id: "b", name: "resumo_mensal", args: %{"mes" => "agosto"}}
+          %{id: "b", name: "agendar_sessao", args: %{"paciente" => "M.S.", "quando" => "terça"}}
         ]
       }
 
@@ -339,7 +341,7 @@ defmodule LiveCeci.Provider.GeminiTest do
                Subject.handle_tool_call(tool_call, self())
 
       assert_received {:provider, {:action, %{action: "presenca", detail: "R.L. · faltou"}}}
-      assert_received {:provider, {:action, %{action: "resumo", detail: "agosto"}}}
+      assert_received {:provider, {:action, %{action: "agendar", detail: "M.S. · terça"}}}
     end
 
     test "an unknown tool still answers the model, but emits no action" do

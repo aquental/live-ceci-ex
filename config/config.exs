@@ -5,7 +5,10 @@ import Config
 # The default backend. It lives here rather than as a fallback inside
 # LiveCeci.Provider.current/0 so the behaviour does not name one of its own
 # implementations — config/runtime.exs overrides it from MODEL.
-config :live_ceci, provider: LiveCeci.Provider.Grok, port: 8000
+config :live_ceci,
+  provider: LiveCeci.Provider.Grok,
+  port: 8000,
+  clinic_source: {:file, "priv/data/clinic.json"}
 
 config :logger, :console,
   format: "$time $metadata[$level] $message\n",

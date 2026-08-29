@@ -16,7 +16,7 @@ defmodule LiveCeci.ApplicationTest do
     children = Supervisor.which_children(LiveCeci.Supervisor)
     ids = Enum.map(children, fn {id, _pid, _type, _mods} -> id end)
 
-    assert [{Bandit, _ref}, LiveCeci.Sessions, LiveCeci.Tickets] = ids
+    assert [{Bandit, _ref}, LiveCeci.Data, LiveCeci.Sessions, LiveCeci.Tickets] = ids
 
     for {_id, pid, _type, _mods} <- children, do: assert(Process.alive?(pid))
   end

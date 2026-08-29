@@ -1,7 +1,34 @@
 defmodule LiveCeci.ToolsTest do
-  use ExUnit.Case, async: true
+  # async: false — listar_*/resumo/fechar_mes read the named Data table.
+  use ExUnit.Case, async: false
 
-  alias LiveCeci.Tools
+  alias LiveCeci.{Data, Tools}
+
+  @clinic %{
+    "patients" => [
+      %{"id" => "p1", "apelido" => "M.S."},
+      %{"id" => "p2", "apelido" => "R.L."}
+    ],
+    "sessions" => [
+      %{"patient_id" => "p1", "date" => "2026-08-15", "time" => "09:00", "status" => "agendada"},
+      %{"patient_id" => "p2", "date" => "2026-08-15", "time" => "14:00", "status" => "agendada"},
+      %{"patient_id" => "p1", "date" => "2026-08-15", "time" => "16:00", "status" => "faltou"}
+    ],
+    "receipts" => [
+      %{"patient_id" => "p1", "date" => "2026-08-15", "valor" => "250"}
+    ],
+    "months" => %{
+      "julho" => %{"status" => "closed", "year" => 2026},
+      "agosto" => %{"status" => "open", "year" => 2026}
+    }
+  }
+
+  setup do
+    original = Data.get_data()
+    Data.reset(@clinic)
+    on_exit(fn -> Data.reset(original) end)
+    :ok
+  end
 
   describe "dispatch/2" do
     test "agendar_sessao returns the action and answers the model with what it did" do
@@ -23,9 +50,54 @@ defmodule LiveCeci.ToolsTest do
                Tools.dispatch("emitir_recibo", %{"paciente" => "A.Q.", "valor" => "250"})
     end
 
-    test "resumo_mensal is the one tool that needs no patient at all" do
-      assert {%{action: "resumo", detail: "agosto"}, %{result: "resumo fechado"}} =
+    test "resumo_mensal is a preview, not a fake close" do
+      assert {%{action: "resumo", detail: "agosto"},
+              %{result: "agosto: 3 sessões, 1 faltas, 1 recebimentos"}} =
                Tools.dispatch("resumo_mensal", %{"mes" => "agosto"})
+
+      refute elem(Tools.dispatch("resumo_mensal", %{"mes" => "agosto"}), 1).result =~ "fechado"
+    end
+
+    test "resumo_mensal says so when the month is already closed" do
+      assert {%{action: "resumo", detail: "julho"}, %{result: result}} =
+               Tools.dispatch("resumo_mensal", %{"mes" => "julho"})
+
+      assert result =~ "já está fechado"
+    end
+
+    test "listar_pacientes joins apelidos" do
+      assert {%{action: "pacientes", detail: "M.S. · R.L."}, %{result: "M.S. · R.L."}} =
+               Tools.dispatch("listar_pacientes", %{})
+    end
+
+    test "listar_pacientes and listar_sessoes_hoje speak the empty state" do
+      Data.reset(%{"patients" => [], "sessions" => [], "receipts" => [], "months" => %{}})
+
+      assert {%{action: "pacientes"}, %{result: "nenhum paciente"}} =
+               Tools.dispatch("listar_pacientes", %{})
+
+      assert {%{action: "sessoes"}, %{result: "nenhuma sessão hoje"}} =
+               Tools.dispatch("listar_sessoes_hoje", %{})
+    end
+
+    test "listar_sessoes_hoje joins apelido and time for Clock.today" do
+      assert {%{action: "sessoes", detail: "M.S. 09h · R.L. 14h · M.S. 16h"},
+              %{result: "M.S. 09h · R.L. 14h · M.S. 16h"}} =
+               Tools.dispatch("listar_sessoes_hoje", %{})
+    end
+
+    test "fechar_mes writes the snapshot and refuses a second close" do
+      assert {%{action: "fechamento", detail: "agosto"},
+              %{result: "mês fechado, dados encaminhados ao contador"}} =
+               Tools.dispatch("fechar_mes", %{"mes" => "agosto"})
+
+      assert {nil, %{result: "esse mês já está fechado"}} =
+               Tools.dispatch("fechar_mes", %{"mes" => "agosto"})
+    end
+
+    test "fechar_mes reports an unknown month instead of confirming" do
+      assert {nil, %{result: "mês desconhecido — pergunte de novo"}} =
+               Tools.dispatch("fechar_mes", %{"mes" => "setembro"})
     end
 
     test "a missing argument reports back instead of confirming something that did not happen" do
@@ -60,7 +132,8 @@ defmodule LiveCeci.ToolsTest do
                })
 
       # A number is the one non-string worth keeping: `mes: 8` is a reasonable emission.
-      assert {%{action: "resumo", detail: "8"}, _result} =
+      # "8" is not a month we know, so there is no action — but it must not crash.
+      assert {nil, %{result: "mês desconhecido" <> _}} =
                Tools.dispatch("resumo_mensal", %{"mes" => 8})
     end
 
@@ -119,7 +192,10 @@ defmodule LiveCeci.ToolsTest do
       {"agendar_sessao", %{"paciente" => "M.S.", "quando" => "terça que vem às 14h"}},
       {"confirmar_presenca", %{"paciente" => "R.L.", "status" => "compareceu"}},
       {"emitir_recibo", %{"paciente" => "A.Q.", "valor" => "250"}},
-      {"resumo_mensal", %{"mes" => "agosto"}}
+      {"resumo_mensal", %{"mes" => "agosto"}},
+      {"listar_pacientes", %{}},
+      {"listar_sessoes_hoje", %{}},
+      {"fechar_mes", %{"mes" => "agosto"}}
     ]
 
     # Wall clock is the only instrument that sees a blocked scheduler, but it also sees
@@ -137,7 +213,10 @@ defmodule LiveCeci.ToolsTest do
       for {name, args} <- @cases do
         elapsed =
           1..3
-          |> Enum.map(fn _ -> elem(:timer.tc(fn -> Tools.dispatch(name, args) end), 0) end)
+          |> Enum.map(fn _ ->
+            Data.reset(@clinic)
+            elem(:timer.tc(fn -> Tools.dispatch(name, args) end), 0)
+          end)
           |> Enum.min()
 
         assert elapsed < @budget_us,
@@ -148,13 +227,12 @@ defmodule LiveCeci.ToolsTest do
 
     # Reductions are immune to machine load, so this half never flakes.
     #
-    # Measured after the argument-coercion fix: 64, 64, 66, 16 for the four clauses, and
-    # 69 for the worst case (every required argument missing, so `complete/2` builds the
-    # error). 90 is deliberately tight rather than round. The reference offender in the
-    # comment above — File.read! of a small file — costs about 40, so this headroom is
-    # smaller than the cheapest thing the test exists to catch. Raising it to a
-    # comfortable 150 would let a file read slip through unnoticed.
-    @budget_reductions 90
+    # Measured after wiring Data (warm): stubs 66-75, listar_pacientes 78, fechar_mes 145,
+    # resumo_mensal and listar_sessoes_hoje 283. 320 is tight against that 283. The
+    # reference offender — File.read! of a small file — still costs about 40 extra, so
+    # 283+40 misses this ceiling the way 66+40 missed 90. Jason.decode is thousands
+    # extra. Do not round up to 400 — that would let a file read on this path through.
+    @budget_reductions 320
 
     test "the cost does not grow with the size of what the model sends" do
       # The property that matters, and a flat budget cannot express it. The model chooses
@@ -184,23 +262,55 @@ defmodule LiveCeci.ToolsTest do
     end
 
     test "no tool does real work" do
-      for {name, args} <- @cases do
-        {:reductions, before} = Process.info(self(), :reductions)
-        Tools.dispatch(name, args)
-        {:reductions, now} = Process.info(self(), :reductions)
+      # First call of a clause pays module-load; this test is about work, not that.
+      for {name, args} <- @cases, do: Tools.dispatch(name, args)
 
-        assert now - before < @budget_reductions,
-               "#{name} burned #{now - before} reductions — dispatch must stay a pattern match over plain data"
+      for {name, args} <- @cases do
+        burned =
+          1..3
+          |> Enum.map(fn _ ->
+            Data.reset(@clinic)
+            {:reductions, before} = Process.info(self(), :reductions)
+            Tools.dispatch(name, args)
+            {:reductions, now} = Process.info(self(), :reductions)
+            now - before
+          end)
+          |> Enum.min()
+
+        assert burned < @budget_reductions,
+               "#{name} burned #{burned} reductions — dispatch must stay a pattern match over plain data"
       end
     end
   end
 
   describe "declarations/0" do
-    test "declares exactly the four operational tools the persona promises" do
+    test "declares exactly the operational tools the persona promises" do
       names = Enum.map(Tools.declarations(), & &1.name)
 
-      assert Enum.sort(names) ==
-               ["agendar_sessao", "confirmar_presenca", "emitir_recibo", "resumo_mensal"]
+      assert Enum.sort(names) == [
+               "agendar_sessao",
+               "confirmar_presenca",
+               "emitir_recibo",
+               "fechar_mes",
+               "listar_pacientes",
+               "listar_sessoes_hoje",
+               "resumo_mensal"
+             ]
+    end
+
+    test "fechar_mes tells the model to wait for a spoken yes" do
+      [%{description: description}] =
+        Enum.filter(Tools.declarations(), &(&1.name == "fechar_mes"))
+
+      assert description =~ "confirmou"
+      assert description =~ "voz alta"
+    end
+
+    test "resumo_mensal says it is a preview and does not close" do
+      [%{description: description}] =
+        Enum.filter(Tools.declarations(), &(&1.name == "resumo_mensal"))
+
+      assert description =~ "Não fecha"
     end
 
     test "every declared tool has a dispatch clause" do
@@ -224,7 +334,10 @@ defmodule LiveCeci.ToolsTest do
         "agendar_sessao" => %{"paciente" => "M.S.", "quando" => "terça"},
         "confirmar_presenca" => %{"paciente" => "M.S.", "status" => "compareceu"},
         "emitir_recibo" => %{"paciente" => "M.S.", "valor" => "250"},
-        "resumo_mensal" => %{"mes" => "agosto"}
+        "resumo_mensal" => %{"mes" => "agosto"},
+        "listar_pacientes" => %{},
+        "listar_sessoes_hoje" => %{},
+        "fechar_mes" => %{"mes" => "agosto"}
       }
 
       for %{name: name} <- Tools.declarations() do
@@ -248,7 +361,7 @@ defmodule LiveCeci.ToolsTest do
     test "declarations survive a JSON round-trip to the API" do
       # The descriptions carry accented Portuguese now, which is exactly the sort of
       # thing that survives Elixir and dies at an encoder boundary.
-      assert Tools.declarations() |> Jason.encode!() |> Jason.decode!() |> length() == 4
+      assert Tools.declarations() |> Jason.encode!() |> Jason.decode!() |> length() == 7
     end
   end
 end

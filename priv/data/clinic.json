@@ -1,0 +1,38 @@
+{
+  "patients": [
+    {"id": "p1", "apelido": "M.S."},
+    {"id": "p2", "apelido": "R.L."},
+    {"id": "p3", "apelido": "A.Q."},
+    {"id": "p4", "apelido": "João"},
+    {"id": "p5", "apelido": "C.M."},
+    {"id": "p6", "apelido": "L.P."},
+    {"id": "p7", "apelido": "Ana"},
+    {"id": "p8", "apelido": "T.F."}
+  ],
+  "sessions": [
+    {"patient_id": "p1", "date": "today", "time": "09:00", "status": "agendada"},
+    {"patient_id": "p5", "date": "today", "time": "11:00", "status": "agendada"},
+    {"patient_id": "p2", "date": "today", "time": "14:00", "status": "agendada"},
+    {"patient_id": "p7", "date": "today", "time": "17:00", "status": "agendada"},
+    {"patient_id": "p4", "date": "2026-08-01", "time": "09:00", "status": "compareceu"},
+    {"patient_id": "p6", "date": "2026-08-08", "time": "14:00", "status": "compareceu"},
+    {"patient_id": "p8", "date": "2026-08-08", "time": "16:00", "status": "faltou"},
+    {"patient_id": "p7", "date": "2026-08-10", "time": "11:00", "status": "compareceu"},
+    {"patient_id": "p3", "date": "2026-08-15", "time": "10:00", "status": "compareceu"},
+    {"patient_id": "p1", "date": "2026-08-15", "time": "16:00", "status": "faltou"},
+    {"patient_id": "p2", "date": "2026-08-22", "time": "10:00", "status": "agendada"},
+    {"patient_id": "p3", "date": "2026-08-22", "time": "15:00", "status": "remarcou"},
+    {"patient_id": "p4", "date": "2026-07-20", "time": "10:00", "status": "compareceu"}
+  ],
+  "receipts": [
+    {"patient_id": "p4", "date": "2026-08-01", "valor": "250"},
+    {"patient_id": "p6", "date": "2026-08-08", "valor": "300"},
+    {"patient_id": "p7", "date": "2026-08-10", "valor": "250"},
+    {"patient_id": "p3", "date": "2026-08-15", "valor": "250"},
+    {"patient_id": "p4", "date": "2026-07-20", "valor": "250"}
+  ],
+  "months": {
+    "julho": {"status": "closed", "year": 2026},
+    "agosto": {"status": "open", "year": 2026}
+  }
+}

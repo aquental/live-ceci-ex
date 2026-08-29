@@ -31,6 +31,13 @@ defmodule LiveCeci.PersonaTest do
     for %{name: name} <- LiveCeci.Tools.declarations(), do: assert(instruction =~ name)
   end
 
+  test "closing the month is preview, confirm, then fechar_mes" do
+    instruction = Persona.instruction()
+    assert instruction =~ "resumo_mensal"
+    assert instruction =~ "fechar_mes"
+    assert instruction =~ "confirma"
+  end
+
   test "system_instruction/0 is shaped as the Content the setup message expects" do
     assert %{parts: [%{text: text}]} = Persona.system_instruction()
     assert text == Persona.instruction()
