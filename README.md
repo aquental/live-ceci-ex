@@ -37,6 +37,8 @@ Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"*
 | `GROK_LIVE_VOICE` | `eve` | Ceci's xAI voice |
 | `PORT` | `8000` | the HTTP port |
 | `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
+| `MAX_SESSIONS` | `8` | how many live sessions may exist at once. Each holds an upstream session that is billed while it lives, and eight tabs is eight of them |
+| `MAX_SESSIONS_PER_ADDRESS` | `4` | the same, per client address. Bound to loopback the two coincide; they stop coinciding the moment `BIND_IP` opens |
 | `ALLOWED_ORIGINS` | — | extra origins allowed to open `/ws`, comma separated, exact `scheme://host:port`. Loopback is always allowed on any port and needs no listing |
 | `TURN_DETECTION` | `manual` | `manual` or `server` — who decides your turn ended. `manual` measured 833 ms faster on xAI and trades that against false turns. Gemini ignores it |
 | `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
@@ -109,6 +111,7 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
+| `lib/live_ceci/sessions.ex` | the cap on concurrent sessions — a GenServer, because deciding correctly under contention means deciding one at a time |
 | `lib/live_ceci/tickets.ex` | single-use tickets for the upgrade — the browser's `new WebSocket(url)` takes no headers, so the credential cannot ride on the upgrade itself |
 | `lib/live_ceci/redact.ex` | `inspect/1` for anything a provider touched — both APIs echo the key back, one in its URL and one in its error text |
 | `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |

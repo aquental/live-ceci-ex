@@ -400,25 +400,42 @@ defmodule LatencyBench do
 
   # ---- plumbing ----------------------------------------------------------------
 
-  # /ws needs a single-use ticket now, so every trial mints one. A browser gets this for
-  # free from fetch(); here it is one :httpc call, and it is the same Origin the client
-  # sends on the upgrade.
+  # /ws needs a single-use ticket now, so every trial mints one. Done with :gen_tcp
+  # rather than :httpc: inets is not in this project's extra_applications, so its ebin is
+  # not on the code path under `mix run` and :httpc dies on a missing :http_util. Adding
+  # an OTP application to the app itself for a spike's benefit is the wrong trade — a
+  # dozen lines of HTTP/1.1 is cheaper than dependency creep.
   defp ticket(port) do
+    body = ""
+
     request =
-      {~c"http://127.0.0.1:#{port}/ws-ticket", [{~c"Origin", ~c"http://127.0.0.1"}], ~c"text/plain",
-       ~c""}
+      "POST /ws-ticket HTTP/1.1\r\n" <>
+        "Host: 127.0.0.1:#{port}\r\n" <>
+        "Origin: http://127.0.0.1\r\n" <>
+        "Content-Length: #{byte_size(body)}\r\n" <>
+        "Connection: close\r\n\r\n" <> body
 
-    case :httpc.request(:post, request, [], []) do
-      {:ok, {{_, 200, _}, _headers, body}} ->
-        body |> to_string() |> Jason.decode!() |> Map.fetch!("ticket")
+    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 5_000)
+    :ok = :gen_tcp.send(socket, request)
+    response = read_all(socket, "")
+    :gen_tcp.close(socket)
 
-      other ->
-        die("could not get a /ws ticket: #{inspect(other)}")
+    case String.split(response, "\r\n\r\n", parts: 2) do
+      [_headers, json] -> json |> Jason.decode!() |> Map.fetch!("ticket")
+      _ -> die("could not get a /ws ticket: #{inspect(response)}")
+    end
+  end
+
+  defp read_all(socket, acc) do
+    case :gen_tcp.recv(socket, 0, 5_000) do
+      {:ok, chunk} -> read_all(socket, acc <> chunk)
+      {:error, :closed} -> acc
+      {:error, reason} -> die("ticket request failed: #{inspect(reason)}")
     end
   end
 
   defp start_apps do
-    for app <- [:jason, :inets, :websockex, :bandit, :gemini_ex] do
+    for app <- [:jason, :websockex, :bandit, :gemini_ex] do
       {:ok, _} = Application.ensure_all_started(app)
     end
   end

@@ -120,7 +120,7 @@ defmodule LiveCeci.Router do
       [origin] ->
         if origin_allowed?(origin) and ticket_ok?(conn) do
           conn
-          |> WebSockAdapter.upgrade(LiveCeci.Socket, [],
+          |> WebSockAdapter.upgrade(LiveCeci.Socket, [address: conn.remote_ip],
             timeout: 60_000,
             max_frame_size: 1_000_000
           )

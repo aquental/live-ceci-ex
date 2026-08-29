@@ -117,6 +117,12 @@ config :live_ceci,
   # Extra origins allowed to open /ws, comma separated, exact scheme://host:port. Loopback
   # origins are always allowed and do not need listing — see LiveCeci.Router. This is for
   # the day BIND_IP opens up and a real page needs in.
+  # How many live sessions may exist at once, and how many from one address. Each one
+  # holds an upstream session that is billed while it lives, and eight tabs is eight of
+  # them. Bound to loopback the two numbers coincide; they stop coinciding the moment
+  # BIND_IP opens.
+  max_sessions: LiveCeci.env_int("MAX_SESSIONS", 8, 1..1_000),
+  max_sessions_per_address: LiveCeci.env_int("MAX_SESSIONS_PER_ADDRESS", 4, 1..1_000),
   allowed_origins:
     System.get_env("ALLOWED_ORIGINS")
     |> to_string()

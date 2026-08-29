@@ -13,6 +13,7 @@ defmodule LiveCeci.Application do
       # Before Bandit: the ticket table has to exist before the first upgrade can ask
       # about it.
       LiveCeci.Tickets,
+      LiveCeci.Sessions,
       {
         Bandit,
         # ThousandIsland defaults to send_timeout: 30_000 (transports/tcp.ex:24). Thirty

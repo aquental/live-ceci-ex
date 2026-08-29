@@ -37,7 +37,28 @@ defmodule LiveCeci.Socket do
   alias LiveCeci.{Provider, Redact}
 
   @impl WebSock
-  def init(_opts) do
+  def init(opts) do
+    # Before anything else, and before provider.open/1 in particular: past this line a
+    # session exists upstream and is billed. Refusing after opening it would cost exactly
+    # what the cap is here to prevent.
+    #
+    # The slot is held by THIS process and released by the Registry when it dies, so
+    # there is nothing for terminate/2 to remember.
+    case LiveCeci.Sessions.join(Keyword.get(opts, :address, {127, 0, 0, 1})) do
+      :ok -> open_session()
+      {:error, :too_many_sessions} -> refuse()
+    end
+  end
+
+  # 1013 Try Again Later, not 1011 Internal Error: the connection was refused, and
+  # nothing went wrong.
+  defp refuse do
+    {:stop, :normal, 1013,
+     json(%{type: "error", message: "muitas conexões — tente daqui a pouco"}),
+     %{session: nil, provider: nil}}
+  end
+
+  defp open_session do
     # Trap exits so a provider crash becomes a message we can report to the browser,
     # instead of silently taking this process down with it.
     Process.flag(:trap_exit, true)

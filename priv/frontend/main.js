@@ -13,6 +13,9 @@ const MAX_BUFFERED = 32000;
 // Roughly 30 s of queued 100 ms chunks. Past that, onended is not doing its job.
 const MAX_SOURCES = 300;
 let dropped = 0;
+// The last error the server sent, if any. onclose lands after onmessage and would
+// otherwise replace the server's explanation with a generic one.
+let lastError = null;
 let ws, audioCtx, workletNode, micStream;
 // Server-owned settings, fetched once from /config.json. Null until then; go() waits
 // for it, because the worklet takes its batch size at construction and never re-reads it.
@@ -113,10 +116,14 @@ async function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws?ticket=${encodeURIComponent(ticket)}`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { dropped = 0; setStatus("ouvindo…"); setOrb("listening"); };
+  ws.onopen = () => { dropped = 0; lastError = null; setStatus("ouvindo…"); setOrb("listening"); };
   ws.onclose = () => {
     if (dropped) console.warn(`${dropped} mic frames dropped — the socket stopped draining`);
-    setStatus("a linha caiu — toque para reconectar");
+    // The server explains itself in an error frame and then closes — a refused session
+    // sends 1013 with "muitas conexões" and the close arrives right behind it. Without
+    // this, onclose overwrote the reason with the generic line and the user was told the
+    // line dropped when in fact they were turned away.
+    setStatus(lastError ? lastError : "a linha caiu — toque para reconectar");
     setOrb("idle");
     stopVoice();                                                          // drop whatever was still queued
     $("talk").disabled = false;                                           // ...the status line said this all along
@@ -128,7 +135,7 @@ async function connect() {
     if (m.type === "transcript") { if (m.role === "user") setOrb("thinking"); addLine(m.role, m.text); }
     else if (m.type === "action") handleAction(m);
     else if (m.type === "interrupted") stopVoice();
-    else if (m.type === "error") { setStatus("erro: " + m.message); console.error(m.message); }
+    else if (m.type === "error") { lastError = m.message; setStatus(m.message); console.error(m.message); }
   };
 }
 

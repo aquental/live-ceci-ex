@@ -7,16 +7,16 @@ defmodule LiveCeci.ApplicationTest do
   # with no test at all, and the things it decides — where the listener binds, how long
   # a write may block — are exactly the ones that are invisible until they are wrong.
 
-  test "the ticket store starts before the listener that depends on it" do
-    # Order matters: an upgrade arriving before the ETS table exists would crash on it.
-    # which_children/1 returns them in reverse start order.
+  test "everything the listener depends on starts before it" do
+    # Order matters: an upgrade arriving before the ticket table or the session registry
+    # exists would crash on them. which_children/1 returns children in REVERSE start
+    # order, so Bandit comes first in this list and must.
     children = Supervisor.which_children(LiveCeci.Supervisor)
+    ids = Enum.map(children, fn {id, _pid, _type, _mods} -> id end)
 
-    assert [{{Bandit, _ref}, bandit, :supervisor, [Bandit]}, {LiveCeci.Tickets, tickets, _, _}] =
-             children
+    assert [{Bandit, _ref}, LiveCeci.Sessions, LiveCeci.Tickets] = ids
 
-    assert Process.alive?(bandit)
-    assert Process.alive?(tickets)
+    for {_id, pid, _type, _mods} <- children, do: assert(Process.alive?(pid))
   end
 
   test "it binds to loopback unless told otherwise" do
