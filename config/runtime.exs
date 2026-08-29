@@ -42,17 +42,19 @@ port =
   end
 
 # MODEL picks the backend. Read here rather than baked in at compile time, so
-# switching providers is an .env edit and a restart.
+# switching providers is an .env edit and a restart. Each branch carries its own
+# defaults: a shared default would have to belong to one of them, and then the other
+# would silently inherit a model name that means nothing to it.
 {provider, model, voice} =
   case System.get_env("MODEL") |> to_string() |> String.upcase() do
-    "GROK" ->
-      {LiveCeci.Provider.Grok, System.get_env("GROK_LIVE_MODEL") || "grok-voice-latest",
-       System.get_env("GROK_LIVE_VOICE") || "eve"}
+    "GOOGLE" ->
+      {LiveCeci.Provider.Gemini,
+       System.get_env("GOOGLE_LIVE_MODEL") || "gemini-3.1-flash-live-preview",
+       System.get_env("GOOGLE_LIVE_VOICE") || "Aoede"}
 
     _ ->
-      {LiveCeci.Provider.Gemini,
-       System.get_env("GOOGLE_LIVE_MODEL") || Application.get_env(:live_ceci, :model),
-       System.get_env("GOOGLE_LIVE_VOICE") || Application.get_env(:live_ceci, :voice)}
+      {LiveCeci.Provider.Grok, System.get_env("GROK_LIVE_MODEL") || "grok-voice-latest",
+       System.get_env("GROK_LIVE_VOICE") || "eve"}
   end
 
 config :live_ceci,

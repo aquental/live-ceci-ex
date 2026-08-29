@@ -11,7 +11,7 @@ Two backends sit behind the same bridge: the **Gemini Live API** via [`gemini_ex
 Requires Elixir `~> 1.17` (developed on 1.20 / OTP 29).
 
 ```bash
-cp .env.example .env          # paste GOOGLE_API_KEY, or GROK_API_KEY with MODEL=GROK
+cp .env.example .env          # paste GROK_API_KEY, or GOOGLE_API_KEY with MODEL=GOOGLE
 mix deps.get
 
 mix run --no-halt
@@ -27,7 +27,7 @@ Try: *"hey Mira"* · *"can you play something dream pop"* · *"skip this"* — t
 
 | Variable | Default | What it does |
 |---|---|---|
-| `MODEL` | `GOOGLE` | `GOOGLE` or `GROK` — which backend answers |
+| `MODEL` | `GROK` | `GROK` or `GOOGLE` — which backend answers |
 | `LANGUAGE` | — | locale for the voice, POSIX or BCP-47 spelling (`pt_BR` and `pt-BR` both work). Omitted entirely when unset; both APIs reject a null here. |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | either name works; `gemini_ex` wants the second, the Python repo's `.env` has the first. Missing it warns at boot (except in `:test`). |
 | `GOOGLE_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | the Gemini Live model |

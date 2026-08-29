@@ -62,8 +62,8 @@ defmodule LiveCeci.Provider do
 
   Read at call time, not compile time, so `MODEL` in `.env` picks the backend
   without a recompile — the same reason the router used to resolve its handler
-  per request.
+  per request. Defaults to Grok; `MODEL=GOOGLE` selects Gemini Live.
   """
   @spec current() :: module()
-  def current, do: Application.get_env(:live_ceci, :provider, LiveCeci.Provider.Gemini)
+  def current, do: Application.get_env(:live_ceci, :provider, LiveCeci.Provider.Grok)
 end

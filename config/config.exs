@@ -1,9 +1,8 @@
 import Config
 
-config :live_ceci,
-  model: "gemini-3.1-flash-live-preview",
-  voice: "Aoede",
-  port: 8000
+# Model and voice are not here: they are per-provider, and config/runtime.exs sets
+# them alongside the provider that gives them meaning.
+config :live_ceci, port: 8000
 
 config :logger, :console,
   format: "$time $metadata[$level] $message\n",
