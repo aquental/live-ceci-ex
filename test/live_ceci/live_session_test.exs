@@ -51,4 +51,44 @@ defmodule LiveCeci.LiveSessionTest do
       assert Process.alive?(self())
     end
   end
+
+  describe "the assumption this module is built on" do
+    # LiveSession does not call gemini_ex's public API. It sends the INTERNAL GenServer
+    # message that Session.send_realtime_input/2 wraps, because the public function
+    # hardcodes a 5 s timeout and this call sits on the audio path.
+    #
+    # mix.exs pins gemini_ex to the minor and says drift "surfaces as a runtime error".
+    # That is not true here either: a patch release is exactly where an internal message
+    # is allowed to change shape, and nothing in this repo would notice until a live call
+    # went silent. The pin cannot check an assumption. This can.
+    @session_source Path.join([
+                      __DIR__,
+                      "..",
+                      "..",
+                      "deps",
+                      "gemini_ex",
+                      "lib",
+                      "gemini",
+                      "live",
+                      "session.ex"
+                    ])
+
+    test "gemini_ex still handles the internal message LiveSession sends" do
+      source = File.read!(@session_source)
+
+      assert source =~ ~r/def handle_call\(\{:send_realtime_input, opts\}/,
+             "gemini_ex no longer handles {:send_realtime_input, opts} as a call. " <>
+               "LiveCeci.LiveSession sends exactly that message and would now time out " <>
+               "on every microphone frame. Check deps/gemini_ex CHANGELOG before bumping."
+    end
+
+    test "the public wrapper still hardcodes the timeout that made this necessary" do
+      # If gemini_ex ever accepts a timeout, this module should stop reaching inside.
+      source = File.read!(@session_source)
+
+      assert source =~ ~r/GenServer\.call\(session, \{:send_realtime_input, opts\}\)/,
+             "gemini_ex's send_realtime_input/2 changed. If it now takes a timeout, " <>
+               "LiveCeci.LiveSession can go back to the public API and this file can shrink."
+    end
+  end
 end

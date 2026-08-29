@@ -259,6 +259,16 @@ defmodule LiveCeci.Provider.GrokTest do
     end
   end
 
+  # Retries a condition until it holds or the budget runs out, instead of sleeping for a
+  # duration somebody guessed. Fast when it passes, and it fails with a real message.
+  defp eventually(check, remaining \\ 1_000) do
+    cond do
+      check.() -> true
+      remaining <= 0 -> false
+      true -> Process.sleep(10) && eventually(check, remaining - 10)
+    end
+  end
+
   describe "open/1 failure paths" do
     test "a failed session.update closes the socket instead of leaking a billed session" do
       # start_link has already succeeded here, so xAI is billing. If session.update then
@@ -272,10 +282,13 @@ defmodule LiveCeci.Provider.GrokTest do
       on_exit(fn -> Process.exit(ws, :kill) end)
 
       Grok.close(ws)
+
       # WebSockex.cast/2 delivers {:"$websockex_cast", :close} to the target's mailbox.
-      Process.sleep(10)
-      assert {:messages, msgs} = Process.info(ws, :messages)
-      assert {:"$websockex_cast", :close} in msgs
+      # Polled rather than slept on: a fixed sleep is a bet on the scheduler.
+      assert eventually(fn ->
+               {:messages, msgs} = Process.info(ws, :messages)
+               {:"$websockex_cast", :close} in msgs
+             end)
     end
   end
 
@@ -300,7 +313,8 @@ defmodule LiveCeci.Provider.GrokTest do
       # Whatever else changes, one stalled upstream must never take the browser
       # connection down with it.
       dead = spawn(fn -> :ok end)
-      Process.sleep(10)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 1_000
 
       assert Grok.send_audio(dead, <<1, 0>>) in [:ok, {:error, {:exit, :noproc}}]
       assert Process.alive?(self())
@@ -324,8 +338,13 @@ defmodule LiveCeci.Provider.GrokTest do
     end
 
     test "tolerates an already-dead session" do
+      # monitor/DOWN, not Process.sleep. A sleep asserts that 20 ms is always enough,
+      # which is a claim about the machine rather than about the code, and it is the
+      # shape of test that passes for a year and then fails once in CI.
       ws = spawn(fn -> :ok end)
-      Process.sleep(20)
+      ref = Process.monitor(ws)
+      assert_receive {:DOWN, ^ref, :process, ^ws, _reason}, 1_000
+
       refute Process.alive?(ws)
       assert :ok = Grok.close(ws)
     end
