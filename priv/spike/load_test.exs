@@ -31,6 +31,11 @@ defmodule Load.StubProvider do
 
   def commit_turn(_session), do: :ok
 
+  # Never read — runtime.exs only asks the two real providers — but the behaviour requires
+  # it, and a warning here is a warning in every load-test run.
+  def defaults,
+    do: %{model: "stub", voice: "stub", model_env: "STUB_MODEL", voice_env: "STUB_VOICE"}
+
   def close(session) do
     if is_pid(session) and Process.alive?(session), do: send(session, :stop)
     :ok

@@ -2,6 +2,8 @@ defmodule LiveCeci.TicketsTest do
   # async: false — one named ETS table, shared by the whole VM.
   use ExUnit.Case, async: false
 
+  alias LiveCeci.EnvSandbox
+
   alias LiveCeci.Tickets
 
   @local {127, 0, 0, 1}
@@ -101,14 +103,13 @@ defmodule LiveCeci.TicketsTest do
              "a legitimate user was locked out by another address's flood"
     end
 
-    test "the global bound evicts the oldest rather than refusing the newest" do
+    test "the global bound evicts rather than refusing the newest" do
       # The backstop, and the direction matters: refusing the newcomer is what let
       # whoever arrived first keep the door shut.
       #
       # The global bound is derived at twice the per-address one, so this drives the
       # per-address knob and computes what the table is allowed to hold.
-      Application.put_env(:live_ceci, :max_tickets_per_address, 10)
-      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
+      EnvSandbox.put_env(:max_tickets_per_address, 10)
       ceiling = 10 * 2
 
       for i <- 1..250, do: Tickets.issue({10, 0, div(i, 256), rem(i, 256)})
@@ -123,8 +124,7 @@ defmodule LiveCeci.TicketsTest do
       # Measured at per-address 150 against a global of 200 — two addresses filled the
       # table and 100 of the first one's 150 were evicted before their owners could
       # present them, a 403 on a ticket the server had handed out seconds earlier.
-      Application.put_env(:live_ceci, :max_tickets_per_address, 10)
-      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
+      EnvSandbox.put_env(:max_tickets_per_address, 10)
 
       # Two addresses at the per-address cap fit exactly, and nothing is evicted.
       a = for _ <- 1..10, do: Tickets.issue({10, 0, 0, 1})
@@ -136,23 +136,110 @@ defmodule LiveCeci.TicketsTest do
       assert Enum.count(a, fn {:ok, t} -> Tickets.consume(t, {10, 0, 0, 1}) == :ok end) == 10
     end
 
-    test "at the 2x ratio a THIRD busy address evicts the first one's live tickets" do
-      # What the ratio costs, measured rather than assumed. This is not a bug report —
-      # 2x is the configured ratio — it is the number to look at before raising
-      # MAX_TICKETS_PER_ADDRESS in a deployment where many distinct addresses each hold
-      # many tickets at once. At 150 per address, a third busy address left the first
-      # with 6 of its 150.
-      Application.put_env(:live_ceci, :max_tickets_per_address, 10)
-      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
+    test "eviction takes from whoever holds the most, so nobody is starved" do
+      # The second denial of service this bound used to be, and the subtler one. Evicting
+      # the globally OLDEST ticket points the weapon at whoever arrived FIRST: measured at
+      # the default cap with three busy addresses, the first address kept 29 of its 150,
+      # the second 121, the third all 150.
+      #
+      # Fair-share eviction converges instead. Every eviction takes from whichever address
+      # is currently largest, so the shares cannot spread: measured at the real defaults
+      # the same three addresses settle at 99/100/101, and at the cap of 10 used here they
+      # settle at 6/6/8. Two is the width, not one — the address doing the inserting is
+      # never evicted from during its own insert, so it ends one ahead.
+      EnvSandbox.put_env(:max_tickets_per_address, 10)
 
-      first = for _ <- 1..10, do: Tickets.issue({10, 0, 0, 1})
-      for _ <- 1..10, do: Tickets.issue({10, 0, 0, 2})
-      for _ <- 1..10, do: Tickets.issue({10, 0, 0, 3})
+      addresses = [{10, 0, 0, 1}, {10, 0, 0, 2}, {10, 0, 0, 3}]
+      for address <- addresses, _ <- 1..10, do: Tickets.issue(address)
 
-      survived = Enum.count(first, fn {:ok, t} -> Tickets.consume(t, {10, 0, 0, 1}) == :ok end)
+      held =
+        Enum.map(addresses, fn address ->
+          :ets.select_count(Tickets, [
+            {{:_, :_, :"$1"}, [{:==, :"$1", {:const, address}}], [true]}
+          ])
+        end)
 
-      assert survived < 10,
-             "the third address should have evicted some of the first's tickets"
+      # 20 slots, three addresses, and the spread bounded. The number that matters is the
+      # minimum: oldest-first left the first address with 29 of 150 at the real defaults,
+      # which is the starvation this replaces.
+      assert Enum.sum(held) == 20
+      assert Enum.max(held) - Enum.min(held) <= 2, "shares came out #{inspect(held)}"
+      assert Enum.min(held) >= 5, "an address was starved: #{inspect(held)}"
+    end
+
+    test "when every address ties, the oldest ticket goes rather than an arbitrary one" do
+      # The case fair-share does not cover on its own: many addresses holding ONE ticket
+      # each all tie at a count of 1, and max_by on the count alone then picks by map
+      # order — arbitrary, and stable, so the same unlucky address would lose its only
+      # ticket every single time. Breaking the tie on expiry makes it "drop whatever is
+      # closest to expiring", which is the right answer when nobody is hoarding.
+      EnvSandbox.put_env(:max_tickets_per_address, 5)
+
+      # Ten distinct addresses, one ticket each, filling the derived bound exactly.
+      issued = for i <- 1..10, do: {i, elem(Tickets.issue({10, 0, 0, i}), 1)}
+      assert Tickets.outstanding() == 10
+
+      # One more address arrives. The oldest ticket — the first one issued — is the one
+      # that goes, not whichever the map happened to enumerate first.
+      {:ok, _} = Tickets.issue({10, 0, 0, 99})
+
+      {_i, oldest} = hd(issued)
+      refute :ets.member(Tickets, oldest), "eviction did not take the oldest ticket"
+    end
+  end
+
+  describe "consuming a ticket" do
+    test "presenting it from the wrong address does not destroy it" do
+      # `:ets.take/2` used to remove the row and check the address afterwards, so a
+      # stolen ticket presented from anywhere else was spent — reproduced, and the
+      # legitimate owner's next attempt answered {:error, :invalid}. Whoever leaked the
+      # ticket could not use it, but could deny it.
+      {:ok, ticket} = Tickets.issue({10, 0, 0, 1})
+
+      assert {:error, :invalid} = Tickets.consume(ticket, {10, 0, 0, 2})
+      assert :ok = Tickets.consume(ticket, {10, 0, 0, 1})
+    end
+
+    test "it still works exactly once from the right address" do
+      {:ok, ticket} = Tickets.issue({10, 0, 0, 1})
+
+      assert :ok = Tickets.consume(ticket, {10, 0, 0, 1})
+      assert {:error, :invalid} = Tickets.consume(ticket, {10, 0, 0, 1})
+    end
+
+    test "an expired ticket is refused, and refusing it does not consume it either" do
+      {:ok, ticket} = Tickets.issue({10, 0, 0, 1})
+      # Reach into the table rather than waiting 30 seconds: the expiry comparison is what
+      # is being tested, not the clock.
+      [{^ticket, _expires, address}] = :ets.lookup(Tickets, ticket)
+      :ets.insert(Tickets, {ticket, System.monotonic_time(:millisecond) - 1, address})
+
+      assert {:error, :invalid} = Tickets.consume(ticket, {10, 0, 0, 1})
+      # The sweep collects it; the failed attempt did not have to.
+      assert :ets.member(Tickets, ticket)
+      Tickets.sweep()
+      refute :ets.member(Tickets, ticket)
+    end
+
+    test "valid?/2 answers without spending, so the peek in the router is free" do
+      # The router asks this BEFORE it asks the Sessions singleton, so an unauthenticated
+      # upgrade never queues on the one process every real upgrade waits behind. It is
+      # only allowed in front of the spend because it does not spend.
+      {:ok, ticket} = Tickets.issue({10, 0, 0, 1})
+
+      assert Tickets.valid?(ticket, {10, 0, 0, 1})
+      assert Tickets.valid?(ticket, {10, 0, 0, 1}), "the peek consumed the ticket"
+      refute Tickets.valid?(ticket, {10, 0, 0, 2})
+      refute Tickets.valid?(nil, {10, 0, 0, 1})
+      refute Tickets.valid?("nonsense", {10, 0, 0, 1})
+
+      assert :ok = Tickets.consume(ticket, {10, 0, 0, 1})
+      refute Tickets.valid?(ticket, {10, 0, 0, 1})
+    end
+
+    test "a nil or non-binary ticket is the same answer as a wrong one" do
+      assert {:error, :invalid} = Tickets.consume(nil, {10, 0, 0, 1})
+      assert {:error, :invalid} = Tickets.consume(:not_a_ticket, {10, 0, 0, 1})
     end
   end
 
@@ -175,8 +262,7 @@ defmodule LiveCeci.TicketsTest do
     end
 
     test "the refusal rate is reported by the sweep timer" do
-      Application.put_env(:live_ceci, :max_tickets_per_address, 2)
-      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
+      EnvSandbox.put_env(:max_tickets_per_address, 2)
 
       for _ <- 1..5, do: Tickets.issue({10, 0, 0, 1})
 

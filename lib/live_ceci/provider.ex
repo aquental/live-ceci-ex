@@ -72,6 +72,26 @@ defmodule LiveCeci.Provider do
   @callback close(session()) :: :ok
 
   @doc """
+  The model and voice this provider uses when nothing overrides them, and the
+  environment variables that do the overriding.
+
+  These used to live in a `case` in `config/runtime.exs`, one branch per provider, which
+  put the knowledge of what a Gemini model name looks like in a file whose job is to read
+  the environment. The branches drifted in exactly the way that arrangement invites: the
+  comment there had to explain that a shared default "would have to belong to one of
+  them, and then the other would silently inherit a model name that means nothing to it".
+
+  It belongs to the provider, which is the module that knows. `runtime.exs` now maps a
+  name to a module and asks.
+  """
+  @callback defaults() :: %{
+              model: String.t(),
+              voice: String.t(),
+              model_env: String.t(),
+              voice_env: String.t()
+            }
+
+  @doc """
   The provider module for this run.
 
   Read at call time, not compile time, so `MODEL` in `.env` picks the backend without a

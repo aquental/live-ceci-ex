@@ -1,5 +1,7 @@
 defmodule LiveCeci.RouterTest do
   use ExUnit.Case, async: true
+
+  alias LiveCeci.EnvSandbox
   import Plug.Test
   import Plug.Conn
 
@@ -18,7 +20,7 @@ defmodule LiveCeci.RouterTest do
   # Sharing 127.0.0.1 across every test in this file exhausted that cap and made
   # unrelated assertions fail on some seeds. Unique addresses also model reality better:
   # these are supposed to be different clients.
-  defp ws_conn(origin \\ "http://localhost:8000", ticket \\ :valid) do
+  defp ws_conn(origin, ticket \\ :valid) do
     address = {127, 0, :rand.uniform(250), :rand.uniform(250)}
 
     query =
@@ -138,6 +140,33 @@ defmodule LiveCeci.RouterTest do
       refute call(ws_conn("http://127.0.0.1:8000")).status == 403
     end
 
+    test "userinfo does not smuggle a hostile origin past the host check" do
+      # `http://evil.example@localhost` parses with host: "localhost", so a check that
+      # reads only the host allowed it — verified true before the fix. No browser puts
+      # userinfo in an Origin header, so anything that does is not a browser.
+      assert call(ws_conn("http://evil.example@localhost:8000")).status == 403
+      assert call(ws_conn("https://evil.example@127.0.0.1")).status == 403
+      refute LiveCeci.Router.origin_allowed?("http://evil.example@localhost")
+    end
+
+    test "the host comparison is case-insensitive, as hostnames are" do
+      # A false NEGATIVE, and the less obvious half of the same bug: this was refused.
+      assert LiveCeci.Router.origin_allowed?("http://LOCALHOST:8000")
+      assert LiveCeci.Router.origin_allowed?("http://LocalHost:8000")
+      refute call(ws_conn("http://LOCALHOST:8000")).status == 403
+    end
+
+    test "a configured origin matches whichever way its default port is written" do
+      # ALLOWED_ORIGINS entries used to be compared as raw strings, so an entry written
+      # with the port did not match a browser that omits it — and browsers omit it.
+      EnvSandbox.put_env(:allowed_origins, ["https://ceci.pro:443"])
+
+      assert LiveCeci.Router.origin_allowed?("https://ceci.pro")
+      assert LiveCeci.Router.origin_allowed?("https://CECI.PRO:443")
+      refute LiveCeci.Router.origin_allowed?("http://ceci.pro")
+      refute LiveCeci.Router.origin_allowed?("https://ceci.pro:8443")
+    end
+
     test "loopback is allowed on any port, because ephemeral ports exist" do
       # latency_bench.exs starts its own listener on whatever the OS hands it. Pinning the
       # port would fight that for no security gain while bound to 127.0.0.1.
@@ -207,6 +236,165 @@ defmodule LiveCeci.RouterTest do
       end
     end
 
+    test "X-Forwarded-For is ignored while TRUSTED_PROXIES is empty" do
+      # The default, and the safe one. Anyone can send this header; honouring it without
+      # knowing who is in front of you replaces a wrong address with an attacker-chosen
+      # one, and every per-address bound in the app is keyed on that address.
+      #
+      # Asserted rather than assumed: this is the one test in the file whose subject is
+      # the EMPTY list, so a leaked put_env from a sibling would turn it into a test of
+      # something else and fail with a confusing address mismatch instead of saying so.
+      assert LiveCeci.config().trusted_proxies == []
+
+      conn =
+        conn(:get, "/healthz")
+        |> put_req_header("x-forwarded-for", "203.0.113.7")
+        |> Map.put(:remote_ip, {10, 0, 0, 1})
+        |> call()
+
+      assert conn.remote_ip == {10, 0, 0, 1}
+    end
+
+    test "a trusted proxy hands over the address it forwarded" do
+      EnvSandbox.put_env(:trusted_proxies, [{10, 0, 0, 1}])
+
+      conn =
+        conn(:get, "/healthz")
+        |> put_req_header("x-forwarded-for", "203.0.113.7")
+        |> Map.put(:remote_ip, {10, 0, 0, 1})
+        |> call()
+
+      assert conn.remote_ip == {203, 0, 113, 7}
+    end
+
+    test "an untrusted peer cannot forge one, however many hops it claims" do
+      EnvSandbox.put_env(:trusted_proxies, [{10, 0, 0, 1}])
+
+      conn =
+        conn(:get, "/healthz")
+        |> put_req_header("x-forwarded-for", "1.2.3.4, 5.6.7.8")
+        |> Map.put(:remote_ip, {192, 168, 1, 9})
+        |> call()
+
+      assert conn.remote_ip == {192, 168, 1, 9}
+    end
+
+    test "the walk stops at the first hop we did not put there" do
+      # Two of ours at the right, the client's own claim further left. Everything left of
+      # the last address we control was written by someone we cannot see.
+      EnvSandbox.put_env(:trusted_proxies, [{10, 0, 0, 1}, {10, 0, 0, 2}])
+
+      conn =
+        conn(:get, "/healthz")
+        |> put_req_header("x-forwarded-for", "198.51.100.4, 203.0.113.7, 10.0.0.2")
+        |> Map.put(:remote_ip, {10, 0, 0, 1})
+        |> call()
+
+      assert conn.remote_ip == {203, 0, 113, 7}
+    end
+
+    test "junk in the header falls back to the peer rather than skipping past it" do
+      # Skipping an unparseable entry would let a client insert one to push the walk a hop
+      # further left, into a value it wrote itself.
+      EnvSandbox.put_env(:trusted_proxies, [{10, 0, 0, 1}])
+
+      conn =
+        conn(:get, "/healthz")
+        |> put_req_header("x-forwarded-for", "203.0.113.7, not-an-ip")
+        |> Map.put(:remote_ip, {10, 0, 0, 1})
+        |> call()
+
+      assert conn.remote_ip == {10, 0, 0, 1}
+    end
+
+    test "an IPv4 client on a dual-stack listener matches an IPv4 TRUSTED_PROXIES entry" do
+      # BIND_IP=:: gives a dual-stack listener and an IPv4 peer then arrives as an
+      # IPv4-mapped IPv6 address — verified, 127.0.0.1 shows up as
+      # {0, 0, 0, 0, 0, 65535, 32512, 1}. Nobody writes that in TRUSTED_PROXIES, and the
+      # mismatch fails CLOSED: the header is ignored and every per-address cap silently
+      # becomes a global one.
+      EnvSandbox.put_env(:trusted_proxies, [{10, 0, 0, 1}])
+
+      mapped = {0, 0, 0, 0, 0, 0xFFFF, 0x0A00, 0x0001}
+
+      conn =
+        conn(:get, "/healthz")
+        |> put_req_header("x-forwarded-for", "203.0.113.7")
+        |> Map.put(:remote_ip, mapped)
+        |> call()
+
+      assert conn.remote_ip == {203, 0, 113, 7}
+    end
+
+    test "a forwarded address that arrives IPv4-mapped is normalised too" do
+      EnvSandbox.put_env(:trusted_proxies, [{10, 0, 0, 1}])
+
+      conn =
+        conn(:get, "/healthz")
+        |> put_req_header("x-forwarded-for", "::ffff:203.0.113.7")
+        |> Map.put(:remote_ip, {10, 0, 0, 1})
+        |> call()
+
+      assert conn.remote_ip == {203, 0, 113, 7}
+    end
+
+    test "a trusted proxy that forwards nothing leaves the peer alone" do
+      EnvSandbox.put_env(:trusted_proxies, [{10, 0, 0, 1}])
+
+      conn = conn(:get, "/healthz") |> Map.put(:remote_ip, {10, 0, 0, 1}) |> call()
+
+      assert conn.remote_ip == {10, 0, 0, 1}
+    end
+
+    test "an IPv6 host is bracketed, and a malformed one falls back to 'self' alone" do
+      # Plug reports an IPv6 host without its brackets, so the naive interpolation built
+      # `ws://::1` — not a URL, so the browser discards the whole directive and blocks the
+      # socket. Only reachable with BIND_IP set to an IPv6 address.
+      csp = fn host ->
+        conn = %{conn(:get, "/healthz") | host: host, port: 8123} |> call()
+        [value] = get_resp_header(conn, "content-security-policy")
+        value
+      end
+
+      assert csp.("::1") =~ "ws://[::1]:8123"
+      refute csp.("::1") =~ "ws://::1"
+      # A Host with a semicolon would end the directive and start another one. There is no
+      # legitimate host this rejects, so it falls back rather than being escaped.
+      assert csp.("evil;script-src *") =~ "connect-src 'self'"
+      refute csp.("evil;script-src *") =~ "ws://"
+    end
+
+    test "a bad ticket is refused before anything touches the Sessions singleton" do
+      # The ordering a security audit corrected. An Origin header is trivial to forge from
+      # anything that is not a browser, so with the capacity check first a flood of forged
+      # upgrades queued on the one GenServer every legitimate upgrade waits behind — and
+      # join/1 fails CLOSED, so the flood would have become "muitas conexões" with every
+      # slot free.
+      #
+      # Asserted as the SHAPE of the route rather than by timing, which would measure the
+      # machine: the ticket check has to appear before the capacity check in the source.
+      source = File.read!("lib/live_ceci/router.ex")
+      [_before, route] = String.split(source, ~s(get "/ws" do), parts: 2)
+      [route, _after] = String.split(route, ~s(get "/healthz"), parts: 2)
+
+      peek = :binary.match(route, "Tickets.valid?") |> elem(0)
+      capacity = :binary.match(route, "Sessions.available?") |> elem(0)
+
+      assert peek < capacity,
+             "the capacity singleton is reachable before the ticket is checked"
+    end
+
+    test "the ticket survives a capacity refusal, and is spent on a real upgrade" do
+      EnvSandbox.put_env(:max_sessions, 0)
+
+      address = {127, 0, 200, :rand.uniform(250)}
+      {:ok, ticket} = LiveCeci.Tickets.issue(address)
+
+      assert call(ticket_conn(ticket, address)).status == 503
+      # Still valid: refusing for capacity must not cost the user their ticket.
+      assert LiveCeci.Tickets.valid?(ticket, address)
+    end
+
     test "the security headers are on every response" do
       # The page loads no third-party anything, so the policy can be this tight for free.
       conn = call(conn(:get, "/healthz"))
@@ -217,8 +405,14 @@ defmodule LiveCeci.RouterTest do
       assert csp =~ "worker-src 'self' blob:"
       # Her voice is played from AudioBuffers.
       assert csp =~ "media-src 'self' blob:"
-      # The socket back to us.
-      assert csp =~ "connect-src 'self' ws: wss:"
+      # The socket back to us, and ONLY back to us. This used to read
+      # `connect-src 'self' ws: wss:`, where the bare schemes match any host — a script
+      # that got onto this page could have streamed the microphone anywhere. Every source
+      # now names this request's own host.
+      assert csp =~ "connect-src 'self' ws://www.example.com wss://www.example.com "
+      assert csp =~ "ws://www.example.com:80 wss://www.example.com:80"
+      refute csp =~ "ws: "
+      refute csp =~ "wss:;"
 
       assert ["nosniff"] = get_resp_header(conn, "x-content-type-options")
       assert ["no-referrer"] = get_resp_header(conn, "referrer-policy")

@@ -1,4 +1,4 @@
-defmodule LiveCeci.LiveSession do
+defmodule LiveCeci.Provider.Gemini.Carrier do
   @moduledoc """
   The process that carries microphone audio to Gemini, so the socket does not.
 
@@ -85,7 +85,7 @@ defmodule LiveCeci.LiveSession do
   defp deliver(session, pcm) do
     # gemini_ex's internal call message rather than its public API, which hardcodes a 5 s
     # timeout. It is why mix.exs pins gemini_ex to the minor, and why
-    # live_session_test.exs reads the dependency to check the clause still exists.
+    # provider/gemini/carrier_test.exs reads the dependency to check the clause still exists.
     #
     # A timeout raises an exit in THIS process now, not in the socket's, which is the
     # whole point — but it is still caught, because a dropped frame must not restart the

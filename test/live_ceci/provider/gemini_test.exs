@@ -187,7 +187,115 @@ defmodule LiveCeci.Provider.GeminiTest do
     end
   end
 
+  describe "defaults/0" do
+    # These used to live in a `case` in config/runtime.exs, one branch per provider.
+    # The test is here because the knowledge is here.
+    test "name the model, the voice, and the variables that override them" do
+      assert %{model: model, voice: voice, model_env: model_env, voice_env: voice_env} =
+               Subject.defaults()
+
+      assert model =~ "gemini"
+      assert voice != ""
+      assert model_env == "GOOGLE_LIVE_MODEL"
+      assert voice_env == "GOOGLE_LIVE_VOICE"
+    end
+  end
+
+  describe "the callbacks session_opts/1 wires" do
+    # session_opts/1 is asserted elsewhere to CONTAIN these five. That is a weaker claim
+    # than it looks: a closure can be present and still call the wrong translator, or the
+    # right one with the arguments swapped. These invoke each one and check what comes
+    # out of the far end.
+    setup do
+      %{opts: Subject.session_opts(owner: self(), model: "m", voice: "v")}
+    end
+
+    test "on_message carries voice through to the owner", %{opts: o} do
+      o[:on_message].(audio_message(@pcm))
+      assert_received {:provider, {:voice, @pcm}}
+    end
+
+    test "on_transcription tags the direction", %{opts: o} do
+      o[:on_transcription].({:output, %{"text" => "pronto"}})
+      assert_received {:provider, {:transcript, :ceci, "pronto"}}
+    end
+
+    test "on_error and on_close reach the owner as neutral events", %{opts: o} do
+      o[:on_error].(:boom)
+      assert_received {:provider, {:error, :boom}}
+
+      o[:on_close].(:remote_closed)
+      assert_received {:provider, {:closed, :remote_closed}}
+    end
+
+    test "on_tool_call dispatches and answers the model", %{opts: o} do
+      call = %ToolCall{
+        function_calls: [%{id: "1", name: "resumo_mensal", args: %{"mes" => "2026-08"}}]
+      }
+
+      assert {:tool_response, [%{id: "1", name: "resumo_mensal"}]} = o[:on_tool_call].(call)
+      assert_received {:provider, {:action, _command}}
+    end
+  end
+
+  describe "drift" do
+    # Three catch-all clauses that all used to be silent. Each one sits in front of a
+    # whole category — every tool call, every server message, every transcript — so a
+    # dependency that changed shape would have taken the category away with no crash, no
+    # log and a green suite. The assertion is that they still ANSWER, which is what keeps
+    # the session alive while someone reads the warning.
+    test "an unrecognised tool call still returns, rather than crashing the session" do
+      assert :ok = Subject.handle_tool_call(%{not: :a_tool_call}, self())
+      refute_received {:provider, _}
+    end
+
+    test "an unrecognised server message is dropped, not raised" do
+      assert :ok = Subject.translate(%{"serverContent" => "some new shape"}, self())
+      refute_received {:provider, _}
+    end
+
+    test "an unrecognised transcript is dropped, not raised" do
+      assert :ok = Subject.translate_transcript({:output, %{"parts" => []}}, self())
+      refute_received {:provider, _}
+    end
+  end
+
+  describe "send_audio/2 and commit_turn/1" do
+    test "audio goes to the carrier, and a dead carrier is not an error" do
+      # The carrier exists precisely so the socket never blocks or exits on the upstream.
+      # A dead one is the sharpest version of that: send_audio must still answer :ok.
+      pid = spawn(fn -> :ok end)
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+
+      assert :ok = Subject.send_audio(%{session: self(), carrier: pid}, @pcm)
+    end
+
+    test "commit_turn is a deliberate no-op — Gemini's own VAD is already the faster one" do
+      assert :ok = Subject.commit_turn(%{session: self(), carrier: self()})
+    end
+  end
+
   describe "close/1" do
+    test "closes a session that is still alive" do
+      # A stand-in for Gemini.Live.Session, which answers close/1 as a GenServer call.
+      # The point is the live branch: the already-dead test below only ever exercised the
+      # guard in front of it.
+      test_pid = self()
+
+      session =
+        spawn(fn ->
+          receive do
+            {:"$gen_call", from, :close} ->
+              GenServer.reply(from, :ok)
+              send(test_pid, :closed)
+          end
+        end)
+
+      assert :ok = Subject.close(%{session: session, carrier: self()})
+      assert_received :closed
+    end
+
     test "tolerates an already-dead session" do
       # monitor/DOWN rather than Process.sleep. Same reasoning as the Grok side: sleeping
       # asserts that 20 ms is always enough, which is a claim about the machine.

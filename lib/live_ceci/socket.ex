@@ -19,6 +19,28 @@ defmodule LiveCeci.Socket do
   `send_client_content/3` — live audio is a stream, not a discrete turn, and the wrong
   one leaves the model never hearing you. See `handle_in/2`.
 
+  ## Two bounds nothing else was applying
+
+  Bandit's WebSocket `:timeout` is an IDLE timeout — it is passed through as
+  ThousandIsland's `{:persistent, timeout}` and resets on every frame read — and an open
+  microphone sends ten frames a second, so it never fired. A tab left open on a second
+  monitor held an upstream session, billed by the minute, until the laptop slept.
+
+  So a session now has a wall clock and a byte budget, both in `LiveCeci.Limits`. Two
+  bounds rather than one because they catch different things: the clock catches the
+  forgotten tab, and the budget catches a client sending faster than real time, which
+  the clock alone would happily let run for its full fifteen minutes.
+
+  A third bound sits alongside them and is not about volume at all. `end_of_speech` is
+  thirty bytes that become a billed model response upstream, so metering bytes does not
+  meter it — a security audit found the loop: one session, one text frame repeated,
+  fifteen minutes of responses. `@min_commit_interval_ms` is the floor. A person cannot
+  end a sentence four times a second, and the model's own answer takes about a second, so
+  the floor costs nothing a real client would notice.
+
+  Both volume bounds end the same way — an `error` frame the browser already renders, then a normal
+  close. The page turns its button into "↻ reconectar" and the person carries on.
+
   ## The wire contract
 
   Browser -> server: binary frames of 16 kHz mono PCM s16le, plus one JSON text frame:
@@ -55,7 +77,7 @@ defmodule LiveCeci.Socket do
   defp refuse do
     {:stop, :normal, 1013,
      json(%{type: "error", message: "muitas conexões — tente daqui a pouco"}),
-     %{session: nil, provider: nil}}
+     %{session: nil, provider: nil, bytes: 0, last_commit: nil}}
   end
 
   defp open_session do
@@ -83,15 +105,20 @@ defmodule LiveCeci.Socket do
       {:ok, session} ->
         # So the cap can close it if this process dies without terminate/2 running.
         LiveCeci.Sessions.attach(provider, session)
+        # The wall clock. send_after rather than a timeout on this callback, because
+        # every WebSock timeout available here is an idle one and this must fire whether
+        # or not the microphone is talking.
+        Process.send_after(self(), :session_expired, LiveCeci.Limits.session_lifetime_ms())
         Logger.info("live session open")
-        {:ok, %{session: session, provider: provider}}
+        {:ok, %{session: session, provider: provider, bytes: 0, last_commit: nil}}
 
       {:error, reason} ->
         Logger.error("failed to open live session: #{Redact.inspect(reason)}")
         # Close, don't linger. A socket left alive with session: nil sends every later
         # binary frame into the no-op clause below, and the browser's continuous mic
         # traffic keeps resetting the idle timeout — so it would never close on its own.
-        {:stop, :normal, 1011, error_frame(reason), %{session: nil, provider: provider}}
+        {:stop, :normal, 1011, error_frame(reason),
+         %{session: nil, provider: provider, bytes: 0, last_commit: nil}}
     end
   end
 
@@ -105,10 +132,12 @@ defmodule LiveCeci.Socket do
     # turn never fires. Dead air. Providers send it as realtime input.
     case provider.send_audio(session, pcm) do
       :ok ->
-        {:ok, state}
+        spent(state, byte_size(pcm))
 
       {:error, reason} ->
         Logger.warning("send_audio failed: #{Redact.inspect(reason)}")
+        # Not counted. A frame the provider refused cost nothing upstream, and charging
+        # for it would let a stalled session close itself early.
         {:ok, state}
     end
   end
@@ -119,12 +148,16 @@ defmodule LiveCeci.Socket do
   # the frontend can send it unconditionally and neither end has to know the mode.
   def handle_in({data, [opcode: :text]}, %{session: session, provider: provider} = state)
       when session != nil do
-    case Jason.decode(data) do
-      {:ok, %{"type" => "end_of_speech"}} -> provider.commit_turn(session)
-      _ -> :ok
-    end
+    state =
+      case Jason.decode(data) do
+        {:ok, %{"type" => "end_of_speech"}} -> maybe_commit(state, provider, session)
+        _ -> state
+      end
 
-    {:ok, state}
+    # Text is charged too. A text frame costs the provider nothing directly, but it costs
+    # US the read and the decode, and Bandit's max_frame_size is a megabyte — so a budget
+    # that only counted audio was a budget with a door next to it.
+    spent(state, byte_size(data))
   end
 
   def handle_in({_data, [opcode: :text]}, state), do: {:ok, state}
@@ -151,6 +184,17 @@ defmodule LiveCeci.Socket do
       _ ->
         {:push, [{:binary, pcm}], state}
     end
+  end
+
+  # The wall clock. Deliberately not a silent disconnect: the browser is told why, in the
+  # frame it already knows how to render, and its own onclose turns the button into
+  # "↻ reconectar". Fifteen minutes is a long conversation, and starting a new one costs
+  # a click.
+  def handle_info(:session_expired, state) do
+    Logger.info("closing session: lifetime reached")
+
+    {:stop, :normal, 1000,
+     json(%{type: "error", message: "sessão encerrada por tempo — toque para recomeçar"}), state}
   end
 
   def handle_info({:provider, :interrupted}, state) do
@@ -193,9 +237,42 @@ defmodule LiveCeci.Socket do
     :ok
   end
 
-  def terminate(_reason, _state), do: :ok
-
   # ----------------------------------------------------------------- private
+
+  # A quarter of a second. A person cannot end a sentence four times a second, the
+  # model's own answer takes about a second, and the browser's gate fires on a falling
+  # edge that has a silence budget behind it — so nothing legitimate is ever this close
+  # together. Below the floor the frame is dropped silently rather than answered with an
+  # error: a client that is merely early is not doing anything wrong.
+  @min_commit_interval_ms 250
+
+  defp maybe_commit(state, provider, session) do
+    now = System.monotonic_time(:millisecond)
+
+    if state.last_commit == nil or now - state.last_commit >= @min_commit_interval_ms do
+      provider.commit_turn(session)
+      %{state | last_commit: now}
+    else
+      state
+    end
+  end
+
+  # The byte budget, checked where the bytes are. Counting on the way out rather than on
+  # the way in means a client that floods faster than the provider drains is bounded by
+  # what actually reached the provider, which is the thing being billed.
+  defp spent(state, bytes) do
+    total = state.bytes + bytes
+
+    if total > LiveCeci.Limits.session_byte_budget() do
+      Logger.info("closing session: byte budget spent (#{total} bytes)")
+
+      {:stop, :normal, 1000,
+       json(%{type: "error", message: "sessão encerrada — limite de áudio atingido"}),
+       %{state | bytes: total}}
+    else
+      {:ok, %{state | bytes: total}}
+    end
+  end
 
   defp transcript_role(:user), do: "user"
   defp transcript_role(:ceci), do: "ceci"

@@ -33,23 +33,27 @@ defmodule LiveCeci.Tickets do
   Its real value now is that it is the seam. When there is an identity to check, it is
   checked in `issue/1` and everything downstream already carries the consequence.
 
-  ## The bound, and the denial of service it used to be
+  ## The bound, and the two denials of service it used to be
 
-  `MAX_TICKETS` stops an unauthenticated endpoint growing a table without end. The
-  first version enforced it globally and refused the NEWEST request, which turned a
-  memory bound into an availability weapon: 200 mints from one address filled the table
-  and every other user got `{:error, :too_many}` — reproduced, not theorised. It cleared
-  30 seconds later when the tickets expired, so it was a denial for the duration of the
-  flood rather than a permanent one, which is not much of a defence.
+  `LiveCeci.Limits.tickets_outstanding/0` stops an unauthenticated endpoint growing a
+  table without end. Getting that bound to behave took two corrections, and both were
+  measured rather than reasoned:
 
-  Two changes fix it, and both matter:
+    * **It refused the newest request.** 200 mints from one address filled the table and
+      every other user got `{:error, :too_many}` — a memory bound turned into an
+      availability weapon. Fixed by capping per address, so filling the table from one
+      place is no longer possible, and by evicting rather than refusing.
 
-    * **Per address.** One address can hold `MAX_TICKETS_PER_ADDRESS` at a time and no more, so
-      filling the table from one place is no longer possible.
-    * **Evict oldest.** If the table is somehow still full, the oldest ticket goes rather
-      than the newest being refused. A ticket already near its expiry is worth less than
-      the request in front of you, and refusing the newcomer is what let an attacker who
-      arrived first keep everyone else out.
+    * **It evicted the globally oldest.** Which is the same weapon pointed at whoever
+      arrived FIRST. Measured at the default cap with three busy addresses: the first
+      address kept **29** of its 150 tickets, the second 121, the third all 150 — the
+      newcomer takes everything and the incumbent starves. `evict_from_largest/0` takes
+      the oldest ticket from whichever address holds the MOST instead, which is max-min
+      fairness: the same three addresses settle at 100 each.
+
+  Eviction never refuses, so a mint always succeeds once past the per-address cap. That
+  is deliberate — the per-address cap is the bound that means something, and the global
+  one is a backstop on memory.
   """
 
   use GenServer
@@ -90,10 +94,11 @@ defmodule LiveCeci.Tickets do
         {:error, :too_many}
 
       true ->
-        # Global backstop. Evicts rather than refuses: the newest request is worth more
-        # than the ticket closest to expiring anyway, and refusing it is what let whoever
-        # arrived first lock the door behind them.
-        if :ets.info(@table, :size) >= max_outstanding(), do: evict_oldest()
+        # Global backstop on memory. It evicts rather than refuses, and it evicts from
+        # whichever address holds the most rather than whichever ticket is oldest — the
+        # two together are what stop this bound being usable as a weapon in either
+        # direction. See the moduledoc for the measurements behind both.
+        if :ets.info(@table, :size) >= max_outstanding(), do: evict_from_largest()
 
         ticket = @bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
         :ets.insert(@table, {ticket, now() + @ttl_ms, address})
@@ -103,42 +108,66 @@ defmodule LiveCeci.Tickets do
 
   # A browser needs one ticket per connection, and a ticket that is minted but never
   # presented still occupies a slot for its full TTL — a failed connect, a closed tab
-  # between the fetch and the upgrade. Twenty in thirty seconds is well past a reconnect
-  # loop with any backoff at all.
-  #
-  # Configurable because "one address" is a deployment question, not a code one. On
-  # loopback it is one person. Behind a NAT or a reverse proxy it is EVERYONE, and this
-  # becomes the ceiling on concurrent users regardless of MAX_SESSIONS — demonstrated by
-  # priv/spike/load_test.exs, where 50 simultaneous clients from 127.0.0.1 got 22
-  # connections and 28 refusals with max_sessions set to 100.
-  defp max_per_address, do: Application.get_env(:live_ceci, :max_tickets_per_address, 150)
-
-  # DERIVED, not configured: twice the per-address bound. The two cannot drift apart,
-  # which is the failure this shape exists to prevent — raising the per-address cap
-  # without raising the global one turns the eviction that protects the table into
-  # something that throws away tickets that were just issued. Measured at per-address 150
-  # against a global of 200: two addresses filled the table and 100 of the first
-  # address's 150 tickets were evicted before their owners could present them.
-  #
-  # Two is the ratio, so the headroom scales with whatever the per-address cap is set to.
-  @outstanding_ratio 2
-  defp max_outstanding, do: max_per_address() * @outstanding_ratio
+  # between the fetch and the upgrade. The cap and the global bound derived from it both
+  # live in LiveCeci.Limits, with the other three ceilings they constrain.
+  defp max_per_address, do: LiveCeci.Limits.tickets_per_address()
+  defp max_outstanding, do: LiveCeci.Limits.tickets_outstanding()
 
   defp count_for(address) do
     :ets.select_count(@table, [{{:_, :_, :"$1"}, [{:==, :"$1", {:const, address}}], [true]}])
   end
 
-  defp evict_oldest do
-    case :ets.foldl(fn {t, exp, _a}, acc -> min_by_expiry(acc, {t, exp}) end, nil, @table) do
-      {ticket, _expires} -> :ets.delete(@table, ticket)
+  # Fair-share, not oldest-first. Whichever address holds the most tickets loses its
+  # oldest one; ties go to whoever the fold reached first, which is arbitrary and fine.
+  # One pass over a table that is 300 rows at the default, on a path that only runs when
+  # the table is already full.
+  #
+  # The property this buys: repeated eviction drives the distribution towards equal
+  # shares, so no address can be starved by one that arrived later. Oldest-first had the
+  # opposite property, measured — see the moduledoc.
+  defp evict_from_largest do
+    counts = :ets.foldl(&tally/2, %{}, @table)
+
+    # Ties break on the oldest ticket, not on map order. With 300 addresses holding one
+    # ticket each every bucket ties at 1, and `max_by` on the count alone would then pick
+    # by internal hash order — which is arbitrary AND stable, so the same unlucky address
+    # would be evicted every time. Breaking on expiry turns that case into "drop whatever
+    # is closest to expiring", which is the right answer there and costs nothing: the fold
+    # already tracks the oldest per address.
+    case Enum.max_by(counts, fn {_address, {count, _t, exp}} -> {count, -exp} end, fn -> nil end) do
+      {_address, {_count, ticket, _expires}} -> :ets.delete(@table, ticket)
       nil -> :ok
     end
   end
 
-  defp min_by_expiry(nil, candidate), do: candidate
+  defp tally({ticket, expires, address}, acc) do
+    Map.update(acc, address, {1, ticket, expires}, fn {count, best, best_exp} ->
+      if expires < best_exp,
+        do: {count + 1, ticket, expires},
+        else: {count + 1, best, best_exp}
+    end)
+  end
 
-  defp min_by_expiry({_t, best} = acc, {_ct, exp} = candidate),
-    do: if(exp < best, do: candidate, else: acc)
+  @doc """
+  Whether a ticket would be accepted, WITHOUT spending it.
+
+  The router asks this before it asks `LiveCeci.Sessions`, so an unauthenticated request
+  never reaches the one process every legitimate upgrade queues behind. That ordering was
+  the other way round and a security audit caught it: the `Origin` check is trivial to
+  satisfy from anything that is not a browser, so a flood of forged upgrades could sit in
+  front of the capacity singleton — and `join/1` fails CLOSED, so the flood would have
+  become "muitas conexões" while every slot was free.
+
+  It is advisory, like `LiveCeci.Sessions.available?/1` and for the same reason: the
+  ticket can be spent by a racing connection between this answer and `consume/2`. That is
+  fine, because `consume/2` remains the authoritative check and still refuses.
+  """
+  @spec valid?(String.t() | nil, :inet.ip_address()) :: boolean()
+  def valid?(ticket, address) when is_binary(ticket) do
+    :ets.select_count(@table, match_spec(ticket, address)) == 1
+  end
+
+  def valid?(_ticket, _address), do: false
 
   @doc """
   Spends a ticket. Succeeds at most once per ticket, and only from the address it was
@@ -149,23 +178,36 @@ defmodule LiveCeci.Tickets do
   """
   @spec consume(String.t() | nil, :inet.ip_address()) :: :ok | {:error, :invalid}
   def consume(ticket, address) when is_binary(ticket) do
-    # take/2 removes and returns atomically, so two connections racing on the same
-    # ticket cannot both win. A GenServer.call would serialise this too, and would put
-    # the ticket check on a single process in front of every upgrade.
-    # No `when expires_at > 0` here, however natural it looks. System.monotonic_time/1
-    # has an arbitrary origin and is deeply negative on this machine — measured at
-    # -576460751723 — so that guard rejected every valid ticket. The comparison below is
-    # the actual check, and it holds whatever the origin is.
-    case :ets.take(@table, ticket) do
-      [{^ticket, expires_at, ^address}] ->
-        if now() < expires_at, do: :ok, else: {:error, :invalid}
-
-      _other ->
-        {:error, :invalid}
+    # One atomic operation that checks all three properties at once, because splitting
+    # them was a bug. `:ets.take/2` used to remove the row and match the address
+    # AFTERWARDS, so presenting a stolen ticket from the wrong address destroyed it:
+    # reproduced, and the legitimate owner's next attempt answered {:error, :invalid}.
+    # Whoever leaked the ticket could not use it, but could deny it.
+    #
+    # A match spec puts the address in the PATTERN, so a row that does not match is
+    # never touched. The ticket is the key and is bound literally, so ETS still resolves
+    # it by hash rather than scanning: measured at 0.50 µs per call over a 300-row table
+    # and 0.41 µs over a 3000-row one — flat, which is what proves it is not a scan. The
+    # `take` it replaces costs 0.12 µs, so this is 0.38 µs more, once per connection,
+    # against a handshake that spends hundreds of milliseconds opening the upstream.
+    #
+    # No `when expires_at > 0` anywhere near this, however natural it looks.
+    # System.monotonic_time/1 has an arbitrary origin and is deeply negative on this
+    # machine — measured at -576460751723 — so that guard rejected every valid ticket.
+    # The guard below compares against `now` and holds whatever the origin is.
+    case :ets.select_delete(@table, match_spec(ticket, address)) do
+      1 -> :ok
+      0 -> {:error, :invalid}
     end
   end
 
   def consume(_ticket, _address), do: {:error, :invalid}
+
+  # Shared by valid?/2 and consume/2 so the two can never disagree about what a good
+  # ticket is — which is the whole point of having a peek in front of the spend.
+  defp match_spec(ticket, address) do
+    [{{ticket, :"$1", address}, [{:<, {:const, now()}, :"$1"}], [true]}]
+  end
 
   # Only when the table is filling. The sweep is an :ets.select_delete over every row,
   # and it used to run on every mint — which was needed back when a full table REFUSED

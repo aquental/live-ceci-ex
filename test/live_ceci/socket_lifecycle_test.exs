@@ -10,6 +10,8 @@ defmodule LiveCeci.SocketLifecycleTest do
   """
   use ExUnit.Case, async: false
 
+  alias LiveCeci.EnvSandbox
+
   alias LiveCeci.Socket
 
   defmodule OkProvider do
@@ -21,6 +23,8 @@ defmodule LiveCeci.SocketLifecycleTest do
     end
 
     def send_audio(_s, _pcm), do: :ok
+    def commit_turn(_s), do: :ok
+    def defaults, do: %{model: "m", voice: "v", model_env: "M", voice_env: "V"}
 
     def close(session) do
       send(self(), {:closed, session})
@@ -34,20 +38,22 @@ defmodule LiveCeci.SocketLifecycleTest do
     # gemini_ex puts it in the WebSocket URL.
     def open(_opts), do: {:error, {:http_error, 403, "API key not valid: AIzaSyFAKE"}}
     def send_audio(_s, _pcm), do: :ok
+    def commit_turn(_s), do: :ok
     def close(_s), do: :ok
+    def defaults, do: %{model: "m", voice: "v", model_env: "M", voice_env: "V"}
   end
 
   defp with_provider(module) do
-    previous = Application.get_env(:live_ceci, :provider)
-    Application.put_env(:live_ceci, :provider, module)
-    on_exit(fn -> Application.put_env(:live_ceci, :provider, previous) end)
+    EnvSandbox.put_env(:provider, module)
   end
 
   describe "init/1 when the session opens" do
     setup do: with_provider(OkProvider)
 
     test "keeps the session and the provider that made it" do
-      assert {:ok, %{session: session, provider: OkProvider}} = Socket.init([])
+      assert {:ok, %{session: session, provider: OkProvider, bytes: 0, last_commit: nil}} =
+               Socket.init([])
+
       assert is_pid(session)
     end
 

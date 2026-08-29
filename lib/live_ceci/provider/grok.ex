@@ -19,6 +19,20 @@ defmodule LiveCeci.Provider.Grok do
   Audio formats are negotiated to exactly what the browser already speaks, 16 kHz
   up and 24 kHz down, so nothing in `priv/frontend` changes when this provider is
   selected.
+
+  ## Why this is one module and not three
+
+  An audit called it out as the largest module in the app, and it was — by a wide margin
+  when it also carried the default model and voice, which now live in `defaults/0` where
+  every provider's do. What is left is 222 lines of code against 187 in `LiveCeci.Tools`
+  and 162 in `LiveCeci.Socket`, so "largest" is no longer much of a claim.
+
+  There are two clean seams in here: the session contract (`session_update/1` and what it
+  builds) and the event translation (`translate/2` and its clauses). Splitting on either
+  would produce three files that are only ever read together, because the thing they
+  describe — one wire protocol — is the unit that has to stay consistent. The size is a
+  consequence of the protocol not having a client library, not of the module doing more
+  than one job.
   """
 
   @behaviour LiveCeci.Provider
@@ -33,6 +47,16 @@ defmodule LiveCeci.Provider.Grok do
   @send_timeout 1_000
 
   # ------------------------------------------------------------------ provider
+
+  @impl LiveCeci.Provider
+  def defaults do
+    %{
+      model: "grok-voice-latest",
+      voice: "eve",
+      model_env: "GROK_LIVE_MODEL",
+      voice_env: "GROK_LIVE_VOICE"
+    }
+  end
 
   @impl LiveCeci.Provider
   def open(opts) do
@@ -80,7 +104,7 @@ defmodule LiveCeci.Provider.Grok do
   end
 
   # Roughly two seconds of microphone at ten frames a second. The same bound, and the
-  # same reasoning, as LiveCeci.LiveSession carries for Gemini.
+  # same reasoning, as LiveCeci.Provider.Gemini.Carrier carries for Gemini.
   @max_queued 20
 
   @impl LiveCeci.Provider
@@ -128,8 +152,19 @@ defmodule LiveCeci.Provider.Grok do
     # Two messages, like the tool handshake: the buffer becomes a user message, then the
     # model is asked for a response. Sending only the first leaves it holding the turn.
     # Cast for the same reason send_audio does — this runs on the socket process.
-    WebSockex.cast(ws, {:send, %{type: "input_audio_buffer.commit"}})
-    WebSockex.cast(ws, {:send, %{type: "response.create"}})
+    #
+    # Behind the same bound, too. send_audio/2 has had `backed_up?/1` since the queue moved
+    # here, and this did not: a security audit pointed out that the cheaper message was the
+    # unguarded one, and that it is the message which asks for a BILLED response. The
+    # socket's own commit floor is the first line; this is what holds if that is ever
+    # bypassed or if the upstream simply stops draining.
+    if backed_up?(ws) do
+      Logger.warning("grok: dropping turn commit, socket behind")
+    else
+      WebSockex.cast(ws, {:send, %{type: "input_audio_buffer.commit"}})
+      WebSockex.cast(ws, {:send, %{type: "response.create"}})
+    end
+
     :ok
   catch
     :exit, _reason -> :ok
@@ -356,7 +391,7 @@ defmodule LiveCeci.Provider.Grok do
 
   # WebSockex.send_frame/3 is a :gen.call, so an unresponsive socket would exit the
   # CALLER — the socket process carrying the microphone. Same hazard, same guard as
-  # LiveCeci.LiveSession on the Gemini side.
+  # LiveCeci.Provider.Gemini.Carrier on the Gemini side.
   defp send_json(ws, payload) do
     WebSockex.send_frame(ws, {:text, Jason.encode!(payload)}, @send_timeout)
   catch

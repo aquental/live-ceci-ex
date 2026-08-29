@@ -1,9 +1,9 @@
-defmodule LiveCeci.LiveSessionTest do
+defmodule LiveCeci.Provider.Gemini.CarrierTest do
   use ExUnit.Case, async: true
 
   import LiveCeci.Eventually
 
-  alias LiveCeci.LiveSession
+  alias LiveCeci.Provider.Gemini.Carrier
 
   # A stand-in for Gemini.Live.Session: answers the same call message, or never answers.
   defmodule StubSession do
@@ -28,9 +28,9 @@ defmodule LiveCeci.LiveSessionTest do
   describe "send_audio/2" do
     test "the mic chunk reaches the session as a realtime input blob" do
       {:ok, session} = StubSession.start_link({:echo, self()})
-      {:ok, carrier} = LiveSession.start_link(session)
+      {:ok, carrier} = Carrier.start_link(session)
 
-      assert :ok = LiveSession.send_audio(carrier, <<1, 2, 3, 4>>)
+      assert :ok = Carrier.send_audio(carrier, <<1, 2, 3, 4>>)
 
       assert_receive {:sent, [audio: blob]}, 1_000
       assert %{data: <<1, 2, 3, 4>>, mime_type: "audio/pcm;rate=16000"} = blob
@@ -42,9 +42,9 @@ defmodule LiveCeci.LiveSessionTest do
       # on the process that also has to push her voice to the browser. Ten frames a
       # second went through that.
       {:ok, session} = StubSession.start_link(:never_replies)
-      {:ok, carrier} = LiveSession.start_link(session)
+      {:ok, carrier} = Carrier.start_link(session)
 
-      {elapsed, :ok} = :timer.tc(fn -> LiveSession.send_audio(carrier, <<0, 0>>) end)
+      {elapsed, :ok} = :timer.tc(fn -> Carrier.send_audio(carrier, <<0, 0>>) end)
 
       assert elapsed < 50_000,
              "send_audio took #{elapsed}µs — the socket process must never wait on the network"
@@ -54,13 +54,13 @@ defmodule LiveCeci.LiveSessionTest do
 
     test "a dead session is not an error the caller has to handle" do
       {:ok, session} = StubSession.start_link({:echo, self()})
-      {:ok, carrier} = LiveSession.start_link(session)
+      {:ok, carrier} = Carrier.start_link(session)
       Process.unlink(session)
       ref = Process.monitor(session)
       Process.exit(session, :kill)
       assert_receive {:DOWN, ^ref, :process, ^session, :killed}
 
-      assert :ok = LiveSession.send_audio(carrier, <<0, 0>>)
+      assert :ok = Carrier.send_audio(carrier, <<0, 0>>)
       assert Process.alive?(self())
     end
 
@@ -70,9 +70,9 @@ defmodule LiveCeci.LiveSessionTest do
       # 5_000 frames at a process that was not draining produced a 5_000-message, 1 MB
       # mailbox and :ok every single time.
       {:ok, session} = StubSession.start_link(:never_replies)
-      {:ok, carrier} = LiveSession.start_link(session)
+      {:ok, carrier} = Carrier.start_link(session)
 
-      for _ <- 1..2_000, do: LiveSession.send_audio(carrier, <<0, 0>>)
+      for _ <- 1..2_000, do: Carrier.send_audio(carrier, <<0, 0>>)
 
       assert eventually(fn ->
                {:message_queue_len, queued} = Process.info(carrier, :message_queue_len)
@@ -83,7 +83,7 @@ defmodule LiveCeci.LiveSessionTest do
   end
 
   describe "the assumption this module is built on" do
-    # LiveSession does not call gemini_ex's public API. It sends the INTERNAL GenServer
+    # Carrier does not call gemini_ex's public API. It sends the INTERNAL GenServer
     # message that Session.send_realtime_input/2 wraps, because the public function
     # hardcodes a 5 s timeout and this call sits on the audio path.
     #
@@ -91,11 +91,12 @@ defmodule LiveCeci.LiveSessionTest do
     # That is not true here either: a patch release is exactly where an internal message
     # is allowed to change shape, and nothing in this repo would notice until a live call
     # went silent. The pin cannot check an assumption. This can.
+    # Mix.Project.deps_path/0 rather than __DIR__ and a run of "..". The relative form
+    # broke the moment this file moved one directory deeper, and it broke by failing to
+    # READ the dependency — which is a test that stops checking its assumption while
+    # looking like it still does.
     @session_source Path.join([
-                      __DIR__,
-                      "..",
-                      "..",
-                      "deps",
+                      Mix.Project.deps_path(),
                       "gemini_ex",
                       "lib",
                       "gemini",
@@ -103,12 +104,12 @@ defmodule LiveCeci.LiveSessionTest do
                       "session.ex"
                     ])
 
-    test "gemini_ex still handles the internal message LiveSession sends" do
+    test "gemini_ex still handles the internal message Carrier sends" do
       source = File.read!(@session_source)
 
       assert source =~ ~r/def handle_call\(\{:send_realtime_input, opts\}/,
              "gemini_ex no longer handles {:send_realtime_input, opts} as a call. " <>
-               "LiveCeci.LiveSession sends exactly that message and would now time out " <>
+               "LiveCeci.Provider.Gemini.Carrier sends exactly that message and would now time out " <>
                "on every microphone frame. Check deps/gemini_ex CHANGELOG before bumping."
     end
 
@@ -118,7 +119,7 @@ defmodule LiveCeci.LiveSessionTest do
 
       assert source =~ ~r/GenServer\.call\(session, \{:send_realtime_input, opts\}\)/,
              "gemini_ex's send_realtime_input/2 changed. If it now takes a timeout, " <>
-               "LiveCeci.LiveSession can go back to the public API and this file can shrink."
+               "LiveCeci.Provider.Gemini.Carrier can go back to the public API and this file can shrink."
     end
   end
 end

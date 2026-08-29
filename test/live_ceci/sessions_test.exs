@@ -2,6 +2,8 @@ defmodule LiveCeci.SessionsTest do
   # async: false — one named GenServer and two application-env limits, shared by the VM.
   use ExUnit.Case, async: false
 
+  alias LiveCeci.EnvSandbox
+
   import LiveCeci.Eventually
 
   alias LiveCeci.Sessions
@@ -9,10 +11,11 @@ defmodule LiveCeci.SessionsTest do
   @local {127, 0, 0, 1}
 
   setup do
-    previous = {
-      Application.get_env(:live_ceci, :max_sessions),
-      Application.get_env(:live_ceci, :max_sessions_per_address)
-    }
+    # No save-and-restore of the caps here any more. It used to save with get_env/2 and
+    # write the result back, which put `nil` once a sibling had deleted the key — and
+    # `get_env/3`'s default does not apply to a key set to nil, so LiveCeci.Limits then
+    # answered nil and limits_test.exs failed on one seed and passed on the next.
+    # LiveCeci.EnvSandbox owns the restore now, per put, using fetch_env/2.
 
     # Every holder is registered here, so a FAILING assertion still releases its slots.
     # The first version cleaned up at the end of each test body; the race test failed,
@@ -34,9 +37,6 @@ defmodule LiveCeci.SessionsTest do
       eventually(fn -> Enum.all?(pids, &(not Process.alive?(&1))) end)
       eventually(fn -> Sessions.total() == 0 end)
       Agent.stop(spawned)
-      {total, per} = previous
-      Application.put_env(:live_ceci, :max_sessions, total)
-      Application.put_env(:live_ceci, :max_sessions_per_address, per)
     end)
 
     # The precondition the re-audit asked for. socket_lifecycle_test.exs also calls
@@ -72,8 +72,8 @@ defmodule LiveCeci.SessionsTest do
 
   describe "the cap" do
     test "sessions are refused once the total is reached", %{spawned: spawned} do
-      Application.put_env(:live_ceci, :max_sessions, 3)
-      Application.put_env(:live_ceci, :max_sessions_per_address, 100)
+      EnvSandbox.put_env(:max_sessions, 3)
+      EnvSandbox.put_env(:max_sessions_per_address, 100)
 
       held = for _ <- 1..3, do: holder(spawned)
       assert Enum.all?(held, fn {_pid, result} -> result == :ok end)
@@ -88,8 +88,8 @@ defmodule LiveCeci.SessionsTest do
     test "one address cannot take every slot", %{spawned: spawned} do
       # Bound to loopback these two numbers coincide. They stop coinciding the moment
       # BIND_IP opens, which is the point of having both.
-      Application.put_env(:live_ceci, :max_sessions, 100)
-      Application.put_env(:live_ceci, :max_sessions_per_address, 2)
+      EnvSandbox.put_env(:max_sessions, 100)
+      EnvSandbox.put_env(:max_sessions_per_address, 2)
 
       held = for _ <- 1..2, do: holder(spawned, {10, 0, 0, 7})
       assert Enum.all?(held, fn {_pid, r} -> r == :ok end)
@@ -114,6 +114,7 @@ defmodule LiveCeci.SessionsTest do
       def send_audio(_s, _pcm), do: :ok
       def commit_turn(_s), do: :ok
       def close({owner, tag}), do: send(owner, {:closed, tag}) && :ok
+      def defaults, do: %{model: "m", voice: "v", model_env: "M", voice_env: "V"}
     end
 
     test "a brutally killed connection still has its upstream closed", %{spawned: spawned} do
@@ -154,8 +155,8 @@ defmodule LiveCeci.SessionsTest do
       # something runs on the way out. terminate/2 does not run for a brutal kill, and a
       # count that leaks on crash walks down to zero available slots and then refuses
       # everyone until a restart. Monitors do not have that failure mode.
-      Application.put_env(:live_ceci, :max_sessions, 2)
-      Application.put_env(:live_ceci, :max_sessions_per_address, 2)
+      EnvSandbox.put_env(:max_sessions, 2)
+      EnvSandbox.put_env(:max_sessions_per_address, 2)
 
       {first, :ok} = holder(spawned)
       {_second, :ok} = holder(spawned)
@@ -178,8 +179,8 @@ defmodule LiveCeci.SessionsTest do
       # five slots, THREE accepted. Refusing while slots are free is an outage, which is
       # a worse failure than the one the cap exists to prevent. Serialising the decision
       # in a GenServer makes it exact.
-      Application.put_env(:live_ceci, :max_sessions, 5)
-      Application.put_env(:live_ceci, :max_sessions_per_address, 5)
+      EnvSandbox.put_env(:max_sessions, 5)
+      EnvSandbox.put_env(:max_sessions_per_address, 5)
 
       results =
         1..40
@@ -194,6 +195,47 @@ defmodule LiveCeci.SessionsTest do
 
       for {pid, _} <- results, do: stop(pid)
       assert eventually(fn -> Sessions.total() == 0 end)
+    end
+  end
+
+  describe "the refusal rate is reported off the call path" do
+    # The counter accumulates until the timer reads it, and every other test in this file
+    # refuses sessions on purpose — so each of these starts by draining whatever is
+    # already there. Without that, the first version asserted "3" and read 4, which is a
+    # true report of a count this test did not own.
+    defp report do
+      pid = Process.whereis(Sessions)
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(pid, :report)
+        # A call, so it queues behind :report — without it capture_log returns before the
+        # GenServer has read the message.
+        :sys.get_state(pid)
+      end)
+    end
+
+    test "a run of refusals is one log line from the timer, not one per caller",
+         %{spawned: spawned} do
+      # join/1 runs SERIALISED in front of every other upgrade. A Logger call there is
+      # paid for by whoever is next in the queue, which is the same hazard, and the same
+      # fix, as LiveCeci.Tickets.issue/1. The counter is asserted through the log the
+      # timer emits, because the counter itself is private state.
+      report()
+
+      EnvSandbox.put_env(:max_sessions, 1)
+      EnvSandbox.put_env(:max_sessions_per_address, 100)
+
+      {held, :ok} = holder(spawned)
+      for _ <- 1..3, do: assert({_pid, {:error, :too_many_sessions}} = holder(spawned))
+
+      assert report() =~ "refused 3 session(s)"
+      stop(held)
+    end
+
+    test "a quiet minute logs nothing" do
+      report()
+
+      refute report() =~ "refused"
     end
   end
 end

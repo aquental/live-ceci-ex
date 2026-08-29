@@ -25,6 +25,16 @@ defmodule LiveCeci.Provider.Gemini do
   alias Gemini.Types.Live.{ServerContent, ServerMessage, ToolCall}
 
   @impl LiveCeci.Provider
+  def defaults do
+    %{
+      model: "gemini-3.1-flash-live-preview",
+      voice: "Aoede",
+      model_env: "GOOGLE_LIVE_MODEL",
+      voice_env: "GOOGLE_LIVE_VOICE"
+    }
+  end
+
+  @impl LiveCeci.Provider
   def open(opts) do
     case Session.start_link(session_opts(opts)) do
       {:ok, session} ->
@@ -46,8 +56,8 @@ defmodule LiveCeci.Provider.Gemini do
     case Session.connect(session) do
       :ok ->
         # The socket must not block on the network, so the blocking call moves to a
-        # process of its own. See LiveCeci.LiveSession.
-        case LiveCeci.LiveSession.start_link(session) do
+        # process of its own. See LiveCeci.Provider.Gemini.Carrier.
+        case LiveCeci.Provider.Gemini.Carrier.start_link(session) do
           {:ok, carrier} ->
             {:ok, %{session: session, carrier: carrier}}
 
@@ -122,7 +132,8 @@ defmodule LiveCeci.Provider.Gemini do
   end
 
   @impl LiveCeci.Provider
-  def send_audio(%{carrier: carrier}, pcm), do: LiveCeci.LiveSession.send_audio(carrier, pcm)
+  def send_audio(%{carrier: carrier}, pcm),
+    do: LiveCeci.Provider.Gemini.Carrier.send_audio(carrier, pcm)
 
   @impl LiveCeci.Provider
   def commit_turn(_session) do
@@ -141,7 +152,7 @@ defmodule LiveCeci.Provider.Gemini do
     # inside LiveCeci.Socket.terminate/2. An exit raised there is raised in OUR stack —
     # trap_exit does nothing for that — so a wedged session could take down the very
     # callback that exists to clean it up, and hold the connection process for five
-    # seconds on the way. Same guard, same reason, as LiveCeci.LiveSession.
+    # seconds on the way. Same guard, same reason, as LiveCeci.Provider.Gemini.Carrier.
     %{session: session} = session
 
     if is_pid(session) and Process.alive?(session) do

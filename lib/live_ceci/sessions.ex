@@ -99,10 +99,6 @@ defmodule LiveCeci.Sessions do
   @spec total() :: non_neg_integer()
   def total, do: GenServer.call(__MODULE__, :total)
 
-  @doc "How many are live from one address."
-  @spec per_address(:inet.ip_address()) :: non_neg_integer()
-  def per_address(address), do: GenServer.call(__MODULE__, {:per_address, address})
-
   # ---------------------------------------------------------------- server
 
   @impl GenServer
@@ -136,9 +132,6 @@ defmodule LiveCeci.Sessions do
   end
 
   def handle_call(:total, _from, state), do: {:reply, map_size(state.holders), state}
-
-  def handle_call({:per_address, address}, _from, state),
-    do: {:reply, count_for(state.holders, address), state}
 
   @impl GenServer
   def handle_cast({:attach, pid, provider, session}, state) do
@@ -190,9 +183,11 @@ defmodule LiveCeci.Sessions do
     Enum.count(holders, fn {_pid, held} -> held.address == address end)
   end
 
-  defp max_total, do: Application.get_env(:live_ceci, :max_sessions, 8)
-
   # Bound to loopback these two are the same number, since every address is 127.0.0.1.
   # They stop being the same the moment BIND_IP opens, which is the point of having both.
-  defp max_per_address, do: Application.get_env(:live_ceci, :max_sessions_per_address, 4)
+  # Both live in LiveCeci.Limits with the ticket caps they interact with — this module and
+  # LiveCeci.Tickets each used to read its own configuration key, which is how the two
+  # ceilings drifted apart the first time.
+  defp max_total, do: LiveCeci.Limits.sessions_total()
+  defp max_per_address, do: LiveCeci.Limits.sessions_per_address()
 end

@@ -55,22 +55,28 @@ defmodule LiveCeci.Redact do
   """
   @spec inspect(term()) :: String.t()
   def inspect(term) do
+    # `binaries: :as_strings` is not cosmetic. Default inspect renders a binary that is
+    # not printable as a byte list, and a key sitting inside one — a raw frame, a
+    # partially-parsed response — comes out as `<<3, 232, 65, 73, 122, ...>>`, which the
+    # string replace below cannot see. Reproduced: the same term redacted clean with this
+    # option and leaked the whole key without it. Forcing the string rendering escapes the
+    # unprintable bytes as `\x03` and leaves the credential as literal text, where both
+    # passes find it.
     term
-    |> Kernel.inspect(limit: 8, printable_limit: 512)
+    |> Kernel.inspect(limit: 8, printable_limit: 512, binaries: :as_strings)
     |> scrub()
   end
 
-  @doc """
-  Removes credentials from an already-rendered string.
-  """
-  @spec scrub(String.t()) :: String.t()
-  def scrub(text) when is_binary(text) do
+  # ---------------------------------------------------------------- private
+
+  # Was public, with a docstring offering it for "an already-rendered string". Nothing
+  # ever called it that way — inspect/1 was the only caller in three months — and a
+  # public function with no caller is a promise this module has not been asked to keep.
+  defp scrub(text) when is_binary(text) do
     text
     |> redact_known()
     |> redact_contextual()
   end
-
-  # ---------------------------------------------------------------- private
 
   defp redact_known(text) do
     Enum.reduce(secrets(), text, fn secret, acc ->

@@ -130,4 +130,26 @@ defmodule LiveCeci.RedactTest do
                "use LiveCeci.Redact.inspect/1"
     end
   end
+
+  describe "a credential inside a binary that is not printable" do
+    test "is redacted, where the default rendering of inspect hid it" do
+      # Reproduced before the fix: Kernel.inspect renders a binary containing any
+      # unprintable byte as a byte LIST — `<<3, 232, 65, 73, 122, ...>>` — and the string
+      # replace cannot see a key spelled out one integer at a time. `binaries: :as_strings`
+      # forces the string rendering, escaping the unprintable bytes and leaving the
+      # credential as literal text where both passes find it.
+      term = {:error, <<3, 232>> <> @key <> <<0>>}
+
+      redacted = LiveCeci.Redact.inspect(term)
+
+      refute redacted =~ @key
+      assert redacted =~ "[REDACTED]"
+      # And it did not just truncate the term away: the surrounding shape survives.
+      assert redacted =~ ":error"
+    end
+
+    test "the byte-list rendering itself is gone, so nothing can hide in it" do
+      refute LiveCeci.Redact.inspect(<<3, 232, 4>>) =~ "<<3, 232, 4>>"
+    end
+  end
 end

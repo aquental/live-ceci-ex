@@ -1,6 +1,6 @@
 # The audit's sharpest dependency finding was that nothing runs mix test automatically.
 # That matters more here than in most projects: gemini_ex is pinned to the minor because
-# LiveCeci.LiveSession calls one of its INTERNAL GenServer messages and the providers
+# LiveCeci.Provider.Gemini.Carrier calls one of its INTERNAL GenServer messages and the providers
 # pattern-match its structs, so a patch release can break this app at runtime with a
 # clean compile. The test suite is the only thing that would notice.
 name: ci

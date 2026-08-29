@@ -57,21 +57,25 @@ port =
     _ -> Application.get_env(:live_ceci, :port)
   end
 
-# MODEL picks the backend. Read here rather than baked in at compile time, so
-# switching providers is an .env edit and a restart. Each branch carries its own
-# defaults: a shared default would have to belong to one of them, and then the other
-# would silently inherit a model name that means nothing to it.
-{provider, model, voice} =
+# MODEL picks the backend. Read here rather than baked in at compile time, so switching
+# providers is an .env edit and a restart.
+#
+# This `case` used to carry each backend's default model and voice, and the comment
+# defending that arrangement had to explain why a shared default was impossible: it
+# "would have to belong to one of them, and then the other would silently inherit a model
+# name that means nothing to it". That is a description of knowledge in the wrong file.
+# The defaults live in the providers now — see `c:LiveCeci.Provider.defaults/0` — and all
+# that is left here is the one thing this file is for, which is mapping a name in the
+# environment to a module.
+provider =
   case System.get_env("MODEL") |> to_string() |> String.upcase() do
-    "GOOGLE" ->
-      {LiveCeci.Provider.Gemini,
-       System.get_env("GOOGLE_LIVE_MODEL") || "gemini-3.1-flash-live-preview",
-       System.get_env("GOOGLE_LIVE_VOICE") || "Aoede"}
-
-    _ ->
-      {LiveCeci.Provider.Grok, System.get_env("GROK_LIVE_MODEL") || "grok-voice-latest",
-       System.get_env("GROK_LIVE_VOICE") || "eve"}
+    "GOOGLE" -> LiveCeci.Provider.Gemini
+    _ -> LiveCeci.Provider.Grok
   end
+
+defaults = provider.defaults()
+model = System.get_env(defaults.model_env) || defaults.model
+voice = System.get_env(defaults.voice_env) || defaults.voice
 
 # Loopback unless told otherwise. Bandit's own default is 0.0.0.0, which on a laptop on
 # café wifi puts an unauthenticated WebSocket in front of a metered API on the open LAN:
@@ -114,9 +118,6 @@ config :live_ceci,
   # start cutting people off mid-sentence, which is the risk this trades for the 833 ms.
   # Gemini ignores it — its own VAD already answers in 1220 ms.
   turn_detection: if(System.get_env("TURN_DETECTION") == "server", do: :server, else: :manual),
-  # Extra origins allowed to open /ws, comma separated, exact scheme://host:port. Loopback
-  # origins are always allowed and do not need listing — see LiveCeci.Router. This is for
-  # the day BIND_IP opens up and a real page needs in.
   # How many live sessions may exist at once, and how many from one address. Each one
   # holds an upstream session that is billed while it lives, and eight tabs is eight of
   # them. Bound to loopback the two numbers coincide; they stop coinciding the moment
@@ -133,8 +134,51 @@ config :live_ceci,
   # MAX_SESSIONS — is what caps concurrent users.
   # The global bound on outstanding tickets is DERIVED from this, at twice the value, so
   # the two cannot be raised out of step. See LiveCeci.Tickets.
-  max_tickets_per_address: LiveCeci.env_int("MAX_TICKETS_PER_ADDRESS", 150, 1..100_000),
+  #
+  # The range used to end at 100_000 and now ends at 2_000, which is a narrowing on
+  # purpose. LiveCeci.Tickets.issue/1 does three passes over the table — the per-address
+  # count, the sweep, and the eviction fold — and a performance audit measured what that
+  # costs as the table grows: 73 µs a mint at the default 300 rows, 446 µs at 2_000,
+  # 4.0 ms at 20_000 and 45 ms at 200_000. Past a couple of thousand the bound that exists
+  # to prevent a denial of service becomes one, and the setting that gets you there is
+  # exactly the NAT/proxy deployment the comment above tells you to raise it for.
+  #
+  # 2_000 per address means a 4_000-row table and under a millisecond a mint, which is
+  # more concurrent connecting users than anything this app is going to see. Raising it
+  # further needs per-address counters kept in the counters table, not a bigger number.
+  max_tickets_per_address: LiveCeci.env_int("MAX_TICKETS_PER_ADDRESS", 150, 1..2_000),
   max_sessions_per_address: LiveCeci.env_int("MAX_SESSIONS_PER_ADDRESS", 4, 1..1_000),
+  # How long one session may live and how much microphone it may send, regardless of
+  # activity. Bandit's WebSocket `:timeout` is an IDLE timeout and an open microphone is
+  # never idle, so before these existed nothing closed a forgotten tab — it held an
+  # upstream session, billed, until the laptop slept. See LiveCeci.Limits.
+  max_session_ms: LiveCeci.env_int("MAX_SESSION_SECONDS", 900, 30..86_400) * 1000,
+  max_session_bytes: LiveCeci.env_int("MAX_SESSION_MB", 100, 1..10_000) * 1_000_000,
+  # Addresses that are allowed to rewrite the client address via X-Forwarded-For, comma
+  # separated. EMPTY BY DEFAULT, and while it is empty the header is ignored entirely —
+  # anyone can send an X-Forwarded-For, so trusting it without knowing who is in front of
+  # you hands every caller a supply of invented identities. Set this to the address of
+  # your reverse proxy and to nothing else.
+  trusted_proxies:
+    System.get_env("TRUSTED_PROXIES")
+    |> to_string()
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.flat_map(fn address ->
+      case :inet.parse_address(String.to_charlist(address)) do
+        {:ok, parsed} ->
+          [parsed]
+
+        {:error, _} ->
+          IO.warn("TRUSTED_PROXIES entry #{inspect(address)} is not an IP address; ignoring")
+          []
+      end
+    end),
+  # Extra origins allowed to open /ws, comma separated, as scheme://host[:port]. Compared
+  # as a parsed {scheme, host, port} triple, so case and a default port written either way
+  # both match. Loopback origins are always allowed and do not need listing — see
+  # LiveCeci.Router. This is for the day BIND_IP opens up and a real page needs in.
   allowed_origins:
     System.get_env("ALLOWED_ORIGINS")
     |> to_string()

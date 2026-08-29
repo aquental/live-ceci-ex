@@ -2,6 +2,8 @@ defmodule LiveCeciTest do
   # async: false — these mutate :live_ceci application env, which every process shares.
   use ExUnit.Case, async: false
 
+  alias LiveCeci.EnvSandbox
+
   describe "config/0" do
     test "reports the model, voice and port the app booted with" do
       assert %{model: model, voice: voice, port: port} = LiveCeci.config()
@@ -24,13 +26,10 @@ defmodule LiveCeciTest do
     # neighbours in .env. A memoized config/0 would silently ignore LIVE_MODEL and
     # LIVE_VOICE, and the failure would only show up as the wrong voice on a live call.
     test "reads the env at call time, so a boot-time override wins" do
-      previous = Application.get_env(:live_ceci, :voice)
-      on_exit(fn -> Application.put_env(:live_ceci, :voice, previous) end)
-
-      Application.put_env(:live_ceci, :voice, "Charon")
+      EnvSandbox.put_env(:voice, "Charon")
       assert %{voice: "Charon"} = LiveCeci.config()
 
-      Application.put_env(:live_ceci, :voice, "Puck")
+      EnvSandbox.put_env(:voice, "Puck")
       assert %{voice: "Puck"} = LiveCeci.config()
     end
   end
