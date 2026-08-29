@@ -1,0 +1,48 @@
+defmodule LiveCeci.ApplicationTest do
+  # async: false — reads the running application's own supervision tree.
+  use ExUnit.Case, async: false
+
+  # The supervisor is started by the test VM itself, so this asserts against what is
+  # actually running rather than re-starting anything. It was the only module in lib/
+  # with no test at all, and the things it decides — where the listener binds, how long
+  # a write may block — are exactly the ones that are invisible until they are wrong.
+
+  test "one listener, supervised one-for-one" do
+    assert Process.whereis(LiveCeci.Supervisor)
+    # Bandit's child id is {Bandit, ref}, not Bandit — it generates one per listener.
+    assert [{{Bandit, _ref}, pid, :supervisor, [Bandit]}] =
+             Supervisor.which_children(LiveCeci.Supervisor)
+
+    assert Process.alive?(pid)
+  end
+
+  test "it binds to loopback unless told otherwise" do
+    # Bandit's own default is 0.0.0.0, which would put an unauthenticated WebSocket in
+    # front of a metered API on the open LAN.
+    assert Application.get_env(:live_ceci, :bind_ip) == {127, 0, 0, 1}
+  end
+
+  test "the listener survives a crashing child" do
+    # one_for_one, so a dropped call never touches another listener. Killing Bandit is
+    # the closest available proxy: the supervisor must bring it back rather than give up.
+    [{_id, pid, _, _}] = Supervisor.which_children(LiveCeci.Supervisor)
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
+
+    assert eventually(fn ->
+             case Supervisor.which_children(LiveCeci.Supervisor) do
+               [{_id, new, _, _}] when is_pid(new) -> new != pid and Process.alive?(new)
+               _ -> false
+             end
+           end)
+  end
+
+  defp eventually(check, remaining \\ 1_000) do
+    cond do
+      check.() -> true
+      remaining <= 0 -> false
+      true -> Process.sleep(10) && eventually(check, remaining - 10)
+    end
+  end
+end

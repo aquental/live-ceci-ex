@@ -51,13 +51,18 @@ defmodule LiveCeci.AgentNameTest do
     # explaining it.
     @roots ["lib", "priv/frontend", "priv/assets/ceci_persona.txt"]
 
+    # Anchored to the forms the name actually took, not the bare substring. `~r/mira/i`
+    # matched "admirar" and "mirante" too, so the guard would have fired on ordinary
+    # Portuguese the day any of this code grew a comment containing one.
+    @old_name ~r/(:mira\b|"mira"|\.mira\b|\bMira\b|mira_persona)/
+
     test "the shipped code and the browser client never say the old name" do
       offenders =
         @roots
         |> Enum.flat_map(&paths/1)
         |> Enum.filter(fn path ->
           case File.read(path) do
-            {:ok, contents} -> contents =~ ~r/mira/i
+            {:ok, contents} -> contents =~ @old_name
             {:error, _} -> false
           end
         end)
