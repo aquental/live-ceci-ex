@@ -27,8 +27,12 @@ defmodule LiveCeci.MixProject do
       # The WebSocket CLIENT. Already in the tree via gemini_ex, but LiveCeci.Provider.Grok
       # uses it directly — there is no Elixir package for the OpenAI Realtime protocol
       # xAI speaks, so that transport is hand-rolled.
-      {:websockex, "~> 0.4"},
-      {:websock_adapter, "~> 0.5"},
+      {:websockex, "~> 0.5.1"},
+      {:websock_adapter, "~> 0.6.0"},
+      # Used directly — LiveCeci.Socket declares `@behaviour WebSock` — but it used to
+      # arrive only through websock_adapter. A behaviour you implement is a dependency
+      # you have; leaving it transitive means a resolver is free to move it under you.
+      {:websock, "~> 0.5"},
 
       # Gemini Live API — Gemini.Live.Session is a GenServer over the Bidi WebSocket.
       # Pinned to the minor: "~> 0.17" would allow anything under 1.0, and 0.16.0 already

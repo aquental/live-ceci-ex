@@ -1,0 +1,46 @@
+# The audit's sharpest dependency finding was that nothing runs mix test automatically.
+# That matters more here than in most projects: gemini_ex is pinned to the minor because
+# LiveCeci.LiveSession calls one of its INTERNAL GenServer messages and the providers
+# pattern-match its structs, so a patch release can break this app at runtime with a
+# clean compile. The test suite is the only thing that would notice, and until now it
+# only ran when somebody remembered to type it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+
+      - run: mix deps.get
+
+      # No .env on a runner, which is the point: config/runtime.exs now refuses to read
+      # one in :test anyway, so a green run here proves the suite does not depend on a
+      # developer's machine.
+      - run: mix compile --warnings-as-errors
+
+      - run: mix format --check-formatted
+
+      - run: mix test
+
+      # Advisory database, not just the retirement flags mix hex.audit reads.
+      - run: mix deps.audit

@@ -1,0 +1,5 @@
+# The versions this project is actually built and tested against. mix.exs declares
+# `elixir: "~> 1.17"`, which is honest about the floor but says nothing about the
+# ceiling — it admits everything up to 2.0.
+elixir 1.20.4-otp-29
+erlang 29.0.5
