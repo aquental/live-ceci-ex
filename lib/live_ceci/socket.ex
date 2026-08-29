@@ -1,21 +1,12 @@
 defmodule LiveCeci.Socket do
   @moduledoc """
-  live-ceci — the live-voice bridge (EP1, ported to Elixir).
+  live-ceci — the live-voice bridge.
 
-  One browser WebSocket = one process = one provider session. Where the Python
-  version runs two asyncio tasks (mic up, audio down), the BEAM needs neither: the
-  socket process *is* the upstream (`handle_in`) and the downstream (`handle_info`),
-  and the Live session is a linked GenServer that pushes messages into our mailbox.
-
-  ## The gotcha that isn't
-
-  The Python original exists to teach one bug: `session.receive()` is a PER-TURN async
-  generator, so iterating it once makes the agent answer a single sentence and go silent
-  forever. It needs an outer `while True`.
-
-  There is no equivalent here, and no way to write it wrong: the provider session is a
-  process that *pushes* every server message into our mailbox. There is no loop to
-  forget to restart. The lesson survives only as this note.
+  One browser WebSocket = one process = one provider session. No reader task and no
+  receive loop: the socket process *is* the upstream (`handle_in`) and the downstream
+  (`handle_info`), and the provider session is a linked GenServer that pushes server
+  messages into our mailbox. There is no iteration to forget to restart, which is the
+  shape of bug this design cannot express.
 
   ## Which backend
 
@@ -24,7 +15,7 @@ defmodule LiveCeci.Socket do
   neutral events documented in `LiveCeci.Provider`, so everything below is the same
   either way — including the frames the browser receives.
 
-  Its sibling gotcha does survive: mic audio goes to `send_realtime_input/2`, NOT
+  The one real trap is upstream: mic audio goes to `send_realtime_input/2`, NOT
   `send_client_content/3` — live audio is a stream, not a discrete turn, and the wrong
   one leaves the model never hearing you. See `handle_in/2`.
 

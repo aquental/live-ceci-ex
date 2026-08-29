@@ -8,8 +8,7 @@ defmodule LiveCeci do
   picks the thread back up.
 
   Built on the Gemini Live API via `gemini_ex` — no agent framework, no Phoenix,
-  so the whole primitive stays visible. An Elixir port of the EP1 demo from the
-  Multimodal Agents Cookbook.
+  so the whole primitive stays visible.
 
   The pieces:
 

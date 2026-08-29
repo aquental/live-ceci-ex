@@ -2,7 +2,7 @@
 
 Talk to **Ceci**, the operational assistant from [ceci.pro](https://ceci.pro): she takes the admin side of a therapy practice — scheduling, attendance, receipts, the accountant's monthly summary — and never touches the clinical side. Talk over her mid-sentence and she stops, listens, and picks the thread back up.
 
-An Elixir port of [`live-dj`](../live-dj) — the demo from **EP1 of the Multimodal Agents Cookbook**. **No Phoenix and no agent framework**, so the whole primitive stays visible.
+**No Phoenix and no agent framework**, so the whole primitive stays visible.
 
 Two backends sit behind the same bridge: the **Gemini Live API** via [`gemini_ex`](https://hex.pm/packages/gemini_ex), and **xAI's Voice Agent**. `MODEL` in `.env` picks one. The browser cannot tell the difference — both negotiate the 16 kHz up / 24 kHz down PCM the client already speaks, so nothing in `priv/frontend` changes either way.
 
@@ -23,13 +23,13 @@ Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"*
 
 ### Configuration
 
-`config/runtime.exs` ships a ten-line dotenv reader, so the Python repo's `.env` works unchanged and we skip a dependency. It only fills in variables that aren't already set — real deployments just set the environment.
+`config/runtime.exs` ships a ten-line dotenv reader so a `.env` beside the project works without pulling a dependency for it. It only fills in variables that aren't already set — real deployments just set the environment.
 
 | Variable | Default | What it does |
 |---|---|---|
 | `MODEL` | `GROK` | `GROK` or `GOOGLE` — which backend answers |
 | `LANGUAGE` | — | locale for the voice, POSIX or BCP-47 spelling (`pt_BR` and `pt-BR` both work). Omitted entirely when unset; both APIs reject a null here. |
-| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | either name works; `gemini_ex` wants the second, the Python repo's `.env` has the first. Missing it warns at boot (except in `:test`). |
+| `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | either name works; `gemini_ex` wants the second, AI Studio hands you the first. Missing it warns at boot (except in `:test`). |
 | `GOOGLE_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | the Gemini Live model |
 | `GOOGLE_LIVE_VOICE` | `Aoede` | Ceci's **native Live** voice |
 | `GROK_API_KEY` | — | required when `MODEL=GROK` |
@@ -57,7 +57,7 @@ Browser ──ws──> Bandit ──> LiveCeci.Socket          (one process per
                            handle_info/2 ──> binary voice + JSON to the browser
 ```
 
-Where the Python version runs **two asyncio tasks** (mic up, audio down), the BEAM needs neither: the socket process *is* both directions. `handle_in/2` is upstream, `handle_info/2` is downstream, and the Live session is a linked GenServer pushing into our mailbox.
+The BEAM needs no reader task and no receive loop: the socket process *is* both directions. `handle_in/2` is upstream, `handle_info/2` is downstream, and the provider session is a linked GenServer pushing into our mailbox.
 
 `LiveCeci.Application` starts exactly one child — `{Bandit, plug: LiveCeci.Router, port: port}`. Bandit supervises the per-connection processes, so there is no hand-rolled supervision tree to get wrong.
 
@@ -78,15 +78,13 @@ The two wire formats disagree about nearly everything — Gemini pushes typed st
 
 The behaviour has no `send_tool_result/3`, and that omission is load-bearing. `gemini_ex` wants a tool result as the callback's **return value**, synchronously, while the model's voice is paused; xAI wants two separate messages. No single signature fits both without being dead weight in one, so each provider dispatches through `LiveCeci.Tools` itself. The decision stays shared; only the handshake differs.
 
-## The gotcha — and the one that vanished
+## The two traps
 
-The Python original exists to teach a bug: `session.receive()` is a **per-turn** async generator, so a naive `async for` makes the agent answer one sentence and go silent forever. It needs an outer `while True`.
+**Mic audio goes to `send_realtime_input`, not `send_client_content`** — the one in [`LiveCeci.Socket`](lib/live_ceci/socket.ex). `send_client_content` is for seeding history before the conversation; point the mic at it and the live turn never fires, so you get dead air.
 
-**That bug cannot be written in Elixir.** `Gemini.Live.Session` is a GenServer that *pushes* every server message through callbacks — there is no generator to exhaust and no loop to forget to restart. The actor model deletes the entire class of bug, which is good engineering and a worse demo.
+**Live function calls are synchronous** — the rule that governs [`LiveCeci.Tools`](lib/live_ceci/tools.ex). The model's voice is paused until your tool returns, so `dispatch/2` is a plain function over plain data: no GenServer call, no HTTP, no `Task.await`. It decides an action, hands it to the socket process, and answers the model in the same breath. `test/live_ceci/tools_test.exs` fails if one starts doing real work — which matters more now that the tools are called `agendar_sessao` and `emitir_recibo` and *sound* like they should hit a database.
 
-Its sibling **does** survive, in [`LiveCeci.Socket`](lib/live_ceci/socket.ex): mic audio goes to `send_realtime_input`, **not** `send_client_content`. `send_client_content` is for seeding history before the conversation; point the mic at it and the live turn never fires, so you get dead air.
-
-And the rule that governs [`LiveCeci.Tools`](lib/live_ceci/tools.ex): live function calls are **synchronous**, so the model's voice is paused until your tool returns. `dispatch/2` is therefore a plain function over plain data — no GenServer call, no HTTP, no `Task.await`. It decides an action, hands it to the socket process, and answers the model in the same breath. `test/live_ceci/tools_test.exs` fails if one starts doing real work — which matters more now that the tools are called `agendar_sessao` and `emitir_recibo` and *sound* like they should hit a database.
+And one bug this design cannot express: a per-turn generator that has to be re-entered in an outer loop — answer one sentence, then silence forever. There is no equivalent here. The provider session *pushes* every server message into the socket's mailbox, so there is no iteration to forget to restart.
 
 ## Why no Phoenix
 
@@ -111,7 +109,6 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
 | `config/runtime.exs` | the `.env` reader and the API-key aliasing |
-| `priv/assets/tracks/` · `priv/assets/tracks.json` | four dream-pop tracks, orphaned by the tool swap — nothing routes to them any more |
 | `priv/frontend/` | the browser client: mic worklet, voice playback, transcript, and the activity panel |
 
 Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
@@ -255,4 +252,4 @@ Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a
 - **Barge-in** is client-side: the browser cuts playback the instant the mic hears you (RMS gate at `0.02` in `priv/frontend/main.js`). The server forwards `interrupted` too.
 - **Mic framing.** The worklet batches PCM into ~100 ms frames rather than emitting one per 128-sample render quantum — at 48 kHz that was 375 WebSocket frames/sec of ~85 bytes, where framing overhead dwarfed the audio. Barge-in can't wait for the batch, so a quantum that crosses the gate posts an RMS-only message immediately and the cut stays instant.
 - **The activity panel** is the browser's only proof the round trip closed: her voice says she booked it, the panel says the tool call actually came back.
-- **Concurrency** is where the port pays off. The Python design doc lists *"what breaks at 10× concurrent: one process holding N sessions saturates."* Here each listener is an isolated, supervised process; one dropped call never touches another.
+- **Concurrency** is where the BEAM pays off: each listener is an isolated, supervised process, so one dropped call never touches another. The failure this avoids is a single process holding N sessions and saturating.

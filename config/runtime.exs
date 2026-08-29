@@ -1,7 +1,7 @@
 import Config
 
-# A ten-line python-dotenv, so `.env` from the Python repo works unchanged and we
-# skip a dependency. Real deployments set the environment directly; this only fills
+# A ten-line dotenv reader, so a `.env` beside the project works and we skip a
+# dependency for it. Real deployments set the environment directly; this only fills
 # in variables that aren't already set.
 env_file = Path.expand("../.env", __DIR__)
 
@@ -19,7 +19,7 @@ if File.exists?(env_file) do
   end)
 end
 
-# gemini_ex reads GEMINI_API_KEY; the Python repo's .env uses GOOGLE_API_KEY. Accept both.
+# gemini_ex reads GEMINI_API_KEY; AI Studio hands you a GOOGLE_API_KEY. Accept both.
 api_key = System.get_env("GEMINI_API_KEY") || System.get_env("GOOGLE_API_KEY")
 
 if api_key do
