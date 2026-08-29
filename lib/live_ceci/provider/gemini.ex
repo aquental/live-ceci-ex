@@ -26,10 +26,45 @@ defmodule LiveCeci.Provider.Gemini do
 
   @impl LiveCeci.Provider
   def open(opts) do
-    with {:ok, session} <- Session.start_link(session_opts(opts)),
-         :ok <- Session.connect(session) do
-      {:ok, session}
+    case Session.start_link(session_opts(opts)) do
+      {:ok, session} -> connect_or_close(session)
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  # The `with` that used to be here dropped `session` when connect/1 failed. Reproduced
+  # with an invalid key: open/1 returned {:error, {:setup_failed, ...}} and left a live
+  # Gemini.Live.Session process behind.
+  #
+  # Worse than the same bug was in Grok, where it was fixed first: the LiveCeci.Sessions
+  # slot is keyed to the SOCKET pid, so a session leaked this way is invisible to the cap
+  # that exists to bound exactly this.
+  defp connect_or_close(session) do
+    case Session.connect(session) do
+      :ok ->
+        {:ok, session}
+
+      {:error, reason} ->
+        close_session(session)
+        {:error, reason}
+    end
+  end
+
+  # Close AND stop. Session.close/1 shuts the upstream WebSocket — which is what stops
+  # the billing, verified in the dependency: do_close/1 calls websocket_module.close/1
+  # and nils the socket — but it returns {:reply, :ok, state} and leaves the GenServer
+  # running. That process is linked to the socket, and the socket exits :normal, which a
+  # process that does not trap exits ignores. Exactly the leak Grok's close/1 documents,
+  # for the third time in this codebase and through a third door.
+  defp close_session(session) do
+    if is_pid(session) and Process.alive?(session) do
+      Session.close(session)
+      GenServer.stop(session, :normal, @close_timeout)
+    end
+
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 
   @doc false
