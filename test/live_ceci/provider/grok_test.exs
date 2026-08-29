@@ -178,13 +178,16 @@ defmodule LiveCeci.Provider.GrokTest do
     end
   end
 
-  describe "session_update/2" do
+  describe "session_update/1" do
     # Characterization, deliberately: this locks the shape the spike verified against
     # the live API. It cannot prove the shape is right — only that nobody changed it
     # by accident, which is the failure mode that survives compilation and 77 tests
     # and then shows up as the model mishearing you.
     setup do
-      %{session: Grok.session_update("luna", "pt-BR").session}
+      %{
+        session:
+          Grok.session_update(voice: "luna", language: "pt-BR", silence_duration_ms: 300).session
+      }
     end
 
     test "audio moves as raw binary in both directions, not base64 in JSON", %{session: s} do
@@ -200,11 +203,25 @@ defmodule LiveCeci.Provider.GrokTest do
     end
 
     test "turn detection carries both timings", %{session: s} do
-      # 500 ms of silence closes a turn. Measured: leaving this unset made short
-      # utterances feel like a stall.
+      # Silence closes a turn. Measured: leaving this unset made short utterances feel
+      # like a stall.
       assert s.turn_detection.type == "server_vad"
-      assert s.turn_detection.silence_duration_ms == 500
+      assert s.turn_detection.silence_duration_ms == 300
       assert s.turn_detection.idle_timeout_ms == 15_000
+    end
+
+    test "the silence budget is the configured one, not a constant" do
+      # The knob is the entire point: SILENCE_DURATION_MS has to survive .env ->
+      # runtime.exs -> Socket.init -> here. A hardcoded value would still pass every
+      # other test in this block, and the .env setting would do nothing.
+      s = Grok.session_update(voice: "eve", silence_duration_ms: 250).session
+      assert s.turn_detection.silence_duration_ms == 250
+    end
+
+    test "an omitted silence budget falls back rather than sending nil" do
+      # xAI validates this field. nil on the wire is an error response, not a default.
+      s = Grok.session_update(voice: "eve").session
+      assert s.turn_detection.silence_duration_ms == 400
     end
 
     test "every declared tool crosses over, shaped the way xAI wants it", %{session: s} do
@@ -226,17 +243,19 @@ defmodule LiveCeci.Provider.GrokTest do
     end
 
     test "a language becomes a transcription hint" do
-      s = Grok.session_update("eve", "es-MX").session
+      s = Grok.session_update(voice: "eve", language: "es-MX").session
       assert s.audio.input.transcription == %{language_hint: "es-MX"}
     end
 
     test "no language means the key is absent, not null — xAI rejects a null" do
-      s = Grok.session_update("eve", nil).session
+      s = Grok.session_update(voice: "eve", language: nil).session
       refute Map.has_key?(s.audio.input, :transcription)
     end
 
     test "it survives the JSON encode it is about to go through" do
-      assert Grok.session_update("luna", "pt-BR") |> Jason.encode!() |> Jason.decode!()
+      assert Grok.session_update(voice: "luna", language: "pt-BR")
+             |> Jason.encode!()
+             |> Jason.decode!()
     end
   end
 

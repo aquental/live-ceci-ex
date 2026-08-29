@@ -55,14 +55,16 @@ defmodule LiveCeci.Socket do
 
     Logger.info(
       "ws connected; opening #{inspect(provider)} session " <>
-        "(model=#{config.model}, voice=#{config.voice}, language=#{config.language})"
+        "(model=#{config.model}, voice=#{config.voice}, language=#{config.language}, " <>
+        "silence=#{config.silence_duration_ms}ms)"
     )
 
     case provider.open(
            owner: self(),
            model: config.model,
            voice: config.voice,
-           language: config.language
+           language: config.language,
+           silence_duration_ms: config.silence_duration_ms
          ) do
       {:ok, session} ->
         Logger.info("live session open")

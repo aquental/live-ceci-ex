@@ -18,21 +18,60 @@ defmodule LiveCeci do
   """
 
   @doc """
-  Runtime configuration: the Live model, Mira's native voice, and the HTTP port.
+  Runtime configuration: the Live model, Mira's native voice, the HTTP port, and the
+  two latency knobs.
+
+  `:silence_duration_ms` and `:frame_samples` are the only settings here that exist to
+  be *changed*: they are the two largest controllable terms in the delay between the
+  end of an utterance and the first byte of Mira's answer, and
+  `priv/spike/latency_bench.exs` measures the effect of moving them.
   """
   @spec config() :: %{
           model: String.t(),
           voice: String.t(),
           language: String.t(),
-          port: pos_integer()
+          port: pos_integer(),
+          silence_duration_ms: non_neg_integer(),
+          frame_samples: pos_integer()
         }
   def config do
     %{
       model: Application.get_env(:live_ceci, :model),
       voice: Application.get_env(:live_ceci, :voice),
       language: Application.get_env(:live_ceci, :language),
-      port: Application.get_env(:live_ceci, :port)
+      port: Application.get_env(:live_ceci, :port),
+      silence_duration_ms: Application.get_env(:live_ceci, :silence_duration_ms),
+      frame_samples: Application.get_env(:live_ceci, :frame_samples)
     }
+  end
+
+  @doc """
+  Reads an integer environment variable, falling back to `default` and SAYING SO.
+
+  The fallback is loud on purpose. Both call sites are latency knobs that exist to be
+  tuned and then measured, and a silent revert to the default on `SILENCE_DURATION_MS=30O`
+  — letter O — would not break anything, would not show up in a log, and would quietly
+  invalidate whichever benchmark run was supposed to justify the number.
+  """
+  @spec env_int(String.t(), integer(), Range.t()) :: integer()
+  def env_int(name, default, min..max//_) do
+    case System.get_env(name) do
+      blank when blank in [nil, ""] ->
+        default
+
+      raw ->
+        case Integer.parse(String.trim(raw)) do
+          {n, ""} when n >= min and n <= max ->
+            n
+
+          _ ->
+            IO.warn(
+              "#{name}=#{inspect(raw)} is not an integer in #{min}..#{max}; using #{default}"
+            )
+
+            default
+        end
+    end
   end
 
   @doc """

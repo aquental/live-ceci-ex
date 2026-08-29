@@ -38,8 +38,6 @@ defmodule LiveCeci.Provider.Grok do
   def open(opts) do
     owner = Keyword.fetch!(opts, :owner)
     model = Keyword.fetch!(opts, :model)
-    voice = Keyword.fetch!(opts, :voice)
-    language = Keyword.get(opts, :language)
     key = Keyword.get(opts, :api_key) || System.get_env("GROK_API_KEY")
 
     cond do
@@ -53,7 +51,7 @@ defmodule LiveCeci.Provider.Grok do
                extra_headers: [{"Authorization", "Bearer " <> key}]
              ) do
           {:ok, ws} ->
-            with :ok <- send_json(ws, session_update(voice, language)) do
+            with :ok <- send_json(ws, session_update(opts)) do
               {:ok, ws}
             end
 
@@ -201,8 +199,13 @@ defmodule LiveCeci.Provider.Grok do
   @doc false
   # Public only so a test can see it. This map is the entire behaviour contract of a
   # session — audio rates, VAD timings, transport, tools, persona — and a typo in any
-  # of it compiles clean and misbehaves at runtime.
-  def session_update(voice, language) do
+  # of it compiles clean and misbehaves at runtime. Takes the same keyword list as
+  # open/1 rather than positional arguments, so a new knob does not bump the arity.
+  def session_update(opts) do
+    voice = Keyword.fetch!(opts, :voice)
+    language = Keyword.get(opts, :language)
+    silence_ms = Keyword.get(opts, :silence_duration_ms, 400)
+
     %{
       type: "session.update",
       session: %{
@@ -211,7 +214,7 @@ defmodule LiveCeci.Provider.Grok do
         instructions: LiveCeci.Persona.instruction(),
         turn_detection: %{
           type: "server_vad",
-          silence_duration_ms: 500,
+          silence_duration_ms: silence_ms,
           # If the listener goes quiet this long after she finishes, she speaks first
           # rather than both sides waiting. Long enough not to talk over a pause.
           idle_timeout_ms: 15_000

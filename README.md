@@ -36,6 +36,10 @@ Try: *"hey Mira"* · *"can you play something dream pop"* · *"skip this"* — t
 | `GROK_LIVE_MODEL` | `grok-voice-latest` | the xAI voice model |
 | `GROK_LIVE_VOICE` | `eve` | Mira's xAI voice |
 | `PORT` | `8000` | the HTTP port |
+| `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
+| `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
+
+The last two are latency knobs, and `priv/spike/latency_bench.exs` measures what moving them buys. Both fall back **loudly**: `SILENCE_DURATION_MS=30O` (letter O) warns at boot rather than silently reverting to the default and invalidating the next benchmark run.
 
 `LiveCeci.config/0` reads the resolved values back out, at call time — so what `runtime.exs` writes at boot is what the session opens with.
 
@@ -122,6 +126,7 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 | `GET /` · `GET /main.js` · `GET /pcm-processor.js` | the client, served from `priv/frontend` |
 | `GET /assets/*` | `tracks.json` and the four mp3s, from `priv/assets` |
 | `GET /healthz` | `200 ok` |
+| `GET /config.json` | `{"frameSamples":N}` — the only channel between `FRAME_SAMPLES` in `.env` and the AudioWorklet that applies it |
 | `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame |
 
 ## The WebSocket contract

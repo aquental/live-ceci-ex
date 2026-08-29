@@ -35,6 +35,7 @@ defmodule LiveCeci.Provider.Gemini do
     model = Keyword.fetch!(opts, :model)
     voice = Keyword.fetch!(opts, :voice)
     language = Keyword.get(opts, :language)
+    silence_ms = Keyword.get(opts, :silence_duration_ms, 400)
 
     [
       model: model,
@@ -52,10 +53,10 @@ defmodule LiveCeci.Provider.Gemini do
       # nothing comes back. Left unset it uses Google's default, which is undocumented
       # here and long enough to feel like a stall on short utterances. Measured for
       # contrast: with a text turn — where the turn closes on send and no detection runs —
-      # first audio comes back in ~900 ms.
+      # first audio comes back in ~900 ms, so this value is added on top of that.
       realtime_input_config: %{
         automatic_activity_detection: %{
-          silence_duration_ms: 500,
+          silence_duration_ms: silence_ms,
           end_of_speech_sensitivity: :high
         }
       },

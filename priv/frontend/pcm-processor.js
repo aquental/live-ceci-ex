@@ -10,7 +10,11 @@
 // already known to be in progress and repeating the message just kills the voice frames
 // that arrived since. HOLD_QUANTA rejects single-sample spikes, and releasing at a lower
 // level than it triggers stops it chattering around the threshold.
-const FRAME_SAMPLES = 1600; // 100 ms at 16 kHz
+// The batch size is NOT a constant here any more: it is a latency knob, set by
+// FRAME_SAMPLES in .env and delivered through /config.json. Smaller shortens the tail
+// of an utterance but multiplies the frame rate — measured, 160 samples made latency
+// roughly 15x worse. 1600 is the default and the value everything was tuned against.
+const DEFAULT_FRAME_SAMPLES = 1600; // 100 ms at 16 kHz
 const HOLD_QUANTA = 3;      // ~8 ms at 48 kHz — below this it is a click, not a word
 const RELEASE_RATIO = 0.6;  // hysteresis: fall this far before the gate can re-arm
 
@@ -19,11 +23,13 @@ class PCMProcessor extends AudioWorkletProcessor {
     super();
     this.ratio = sampleRate / 16000; // sampleRate = the context's native rate (e.g. 48000)
     this._frac = 0;
-    this._buf = new Int16Array(FRAME_SAMPLES);
+    const opts = (options && options.processorOptions) || {};
+    this._frameSamples = opts.frameSamples || DEFAULT_FRAME_SAMPLES;
+    this._buf = new Int16Array(this._frameSamples);
     this._len = 0;
     this._above = 0;                 // consecutive quanta over the gate
     this._open = false;              // true once this utterance has already been reported
-    this._bargeRms = (options && options.processorOptions && options.processorOptions.bargeRms) || 0.02;
+    this._bargeRms = opts.bargeRms || 0.02;
   }
   process(inputs) {
     const input = inputs[0];
@@ -49,7 +55,7 @@ class PCMProcessor extends AudioWorkletProcessor {
 
     for (let i = 0; i < out.length; i++) {
       this._buf[this._len++] = out[i] < 0 ? out[i] * 0x8000 : out[i] * 0x7fff;
-      if (this._len === FRAME_SAMPLES) this._flush();
+      if (this._len === this._frameSamples) this._flush();
     }
 
     if (rms >= this._bargeRms) {

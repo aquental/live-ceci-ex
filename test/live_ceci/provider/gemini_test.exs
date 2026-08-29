@@ -112,7 +112,16 @@ defmodule LiveCeci.Provider.GeminiTest do
     # cannot prove the shape is right — only that nobody changed it by accident,
     # which compiles clean and passes every other test in this file.
     setup do
-      %{opts: Subject.session_opts(owner: self(), model: "m", voice: "Aoede", language: "pt-BR")}
+      opts =
+        Subject.session_opts(
+          owner: self(),
+          model: "m",
+          voice: "Aoede",
+          language: "pt-BR",
+          silence_duration_ms: 300
+        )
+
+      %{opts: opts}
     end
 
     test "audio only — she speaks, she does not type", %{opts: o} do
@@ -137,8 +146,23 @@ defmodule LiveCeci.Provider.GeminiTest do
       # Leaving this unset used Google's default, which made short utterances feel
       # like a stall.
       aad = o[:realtime_input_config].automatic_activity_detection
-      assert aad.silence_duration_ms == 500
+      assert aad.silence_duration_ms == 300
       assert aad.end_of_speech_sensitivity == :high
+    end
+
+    test "the silence budget is the configured one, not a constant" do
+      # Same guard as the Grok side: the knob has to reach the wire, and a hardcoded
+      # value here would pass every other test in this block while .env did nothing.
+      o =
+        Subject.session_opts(owner: self(), model: "m", voice: "Aoede", silence_duration_ms: 250)
+
+      assert o[:realtime_input_config].automatic_activity_detection.silence_duration_ms == 250
+    end
+
+    test "an omitted silence budget falls back rather than sending nil" do
+      o = Subject.session_opts(owner: self(), model: "m", voice: "Aoede")
+
+      assert o[:realtime_input_config].automatic_activity_detection.silence_duration_ms == 400
     end
 
     test "both transcription directions are on — the browser draws both", %{opts: o} do

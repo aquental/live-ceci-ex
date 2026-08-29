@@ -63,4 +63,14 @@ config :live_ceci,
   voice: voice,
   # POSIX spelling in .env, BCP-47 on the wire. Both providers want the latter.
   language: LiveCeci.normalize_language(System.get_env("LANGUAGE")),
-  port: port
+  port: port,
+  # How long a provider's VAD waits in silence before deciding the turn is over. It is
+  # a hard floor under every answer — nothing comes back until it elapses — and both
+  # backends take the same field, so it is set once here and passed to whichever opens.
+  silence_duration_ms: LiveCeci.env_int("SILENCE_DURATION_MS", 400, 0..10_000),
+  # Mic batch size, in 16 kHz samples, sent to the browser over /config.json. Also the
+  # tail cost of an utterance: the last partial batch waits here before it is sent.
+  # Smaller is not automatically faster — measured, 160 samples (10 ms) made latency
+  # roughly 15x WORSE by head-of-line blocking on 375 frames/sec. Move it with
+  # priv/spike/latency_bench.exs open.
+  frame_samples: LiveCeci.env_int("FRAME_SAMPLES", 1600, 160..16_000)

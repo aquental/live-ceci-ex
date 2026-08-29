@@ -28,6 +28,26 @@ defmodule LiveCeci.RouterTest do
       assert conn.resp_body == "ok"
     end
 
+    # The only channel between FRAME_SAMPLES in .env and the AudioWorklet that applies
+    # it. If this route stops answering, the browser silently keeps the built-in default
+    # and the .env setting does nothing visible.
+    test "/config.json hands the browser the mic batch size" do
+      conn = call(conn(:get, "/config.json"))
+
+      assert conn.status == 200
+      assert ["application/json" <> _] = get_resp_header(conn, "content-type")
+
+      assert %{"frameSamples" => frame} = Jason.decode!(conn.resp_body)
+      assert frame == LiveCeci.config().frame_samples
+    end
+
+    test "/config.json carries nothing but the knob — no keys, no model names" do
+      # It is world-readable and unauthenticated. Everything on it is something the
+      # browser already knows, because the browser is what enforces it.
+      assert Jason.decode!(call(conn(:get, "/config.json")).resp_body) |> Map.keys() ==
+               ["frameSamples"]
+    end
+
     test "an unknown path is a 404, not a crash" do
       conn = call(conn(:get, "/no-such-thing"))
 

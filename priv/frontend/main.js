@@ -10,6 +10,9 @@ const music = $("music");
 // word; a deliberate interruption read 0.054. 0.04 sits between them.
 const BARGE_RMS = 0.04;
 let ws, audioCtx, workletNode, micStream;
+// Server-owned settings, fetched once from /config.json. Null until then; go() waits
+// for it, because the worklet takes its batch size at construction and never re-reads it.
+let serverConfig = null;
 let nextStart = 0;
 let activeSources = [];
 let speaking = false;
@@ -101,6 +104,13 @@ function connect() {
   };
 }
 
+// A failed fetch must not cost the microphone, so this falls back rather than throwing.
+// The worklet carries the same default, and disagreeing with it here would be worse
+// than having no value at all.
+async function loadConfig() {
+  try { serverConfig = await (await fetch("/config.json")).json(); } catch { serverConfig = {}; }
+}
+
 async function startMic() {
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   await audioCtx.audioWorklet.addModule("/pcm-processor.js");
@@ -109,7 +119,9 @@ async function startMic() {
   });
   const source = audioCtx.createMediaStreamSource(micStream);
   workletNode = new AudioWorkletNode(audioCtx, "pcm-processor", {
-    processorOptions: { bargeRms: BARGE_RMS },                            // one source of truth
+    // bargeRms is the browser's alone; frameSamples comes from .env via /config.json.
+    // Undefined is fine — the worklet falls back to the same default this does.
+    processorOptions: { bargeRms: BARGE_RMS, frameSamples: serverConfig.frameSamples },
   });
   workletNode.port.onmessage = (e) => {
     // pcm arrives in ~100 ms batches; rms-only messages come between them for barge-in
@@ -127,6 +139,7 @@ async function go() {
   // and the worklet perfectly alive — only the socket needs rebuilding — and running
   // startMic twice would strand the old graph and re-prompt for the microphone.
   if (!tracks.length) await loadTracks();
+  if (!serverConfig) await loadConfig();
   if (!audioCtx) await startMic();
   connect();
   $("talk").textContent = "● live";
