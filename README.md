@@ -109,6 +109,7 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
+| `lib/live_ceci/redact.ex` | `inspect/1` for anything a provider touched — both APIs echo the key back, one in its URL and one in its error text |
 | `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
 | `config/runtime.exs` | the `.env` reader and the API-key aliasing |
 | `priv/frontend/` | the browser client: mic worklet, voice playback, transcript, and the activity panel |

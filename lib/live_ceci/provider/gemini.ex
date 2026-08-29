@@ -126,7 +126,7 @@ defmodule LiveCeci.Provider.Gemini do
   # Same again: a ToolCall whose shape changed would drop every tool the model asks for,
   # and she would keep talking as if nothing had happened.
   def handle_tool_call(other, _owner) do
-    Logger.warning("gemini: unrecognised tool call #{inspect(other, limit: 3)}")
+    Logger.warning("gemini: unrecognised tool call #{LiveCeci.Redact.inspect(other)}")
     :ok
   end
 
@@ -153,7 +153,7 @@ defmodule LiveCeci.Provider.Gemini do
   # changed struct shape would have taken her voice away with no crash, no log, and a
   # green test suite. The pin does not protect a catch-all; a log does.
   def translate(other, _owner) do
-    Logger.warning("gemini: unrecognised server message #{inspect(other, limit: 3)}")
+    Logger.warning("gemini: unrecognised server message #{LiveCeci.Redact.inspect(other)}")
     :ok
   end
 
@@ -170,7 +170,7 @@ defmodule LiveCeci.Provider.Gemini do
   # A different shape is drift, and would silently delete every transcript. Same reasoning
   # as translate/2 above.
   def translate_transcript(other, _owner) do
-    Logger.warning("gemini: unrecognised transcript #{inspect(other, limit: 3)}")
+    Logger.warning("gemini: unrecognised transcript #{LiveCeci.Redact.inspect(other)}")
     :ok
   end
 

@@ -278,6 +278,33 @@ defmodule LiveCeci.Provider.GrokTest do
     end
   end
 
+  describe "handle_connect/2" do
+    test "the socket process is marked sensitive, so a crash report cannot print the key" do
+      # WebSockex keeps extra_headers — "Authorization: Bearer <key>" — inside the
+      # %WebSockex.Conn{} it carries as state. LiveCeci.Redact cannot reach that: crash
+      # reports are written by the VM, not by our Logger calls. :sensitive is the VM's
+      # own answer, and it is the DEFAULT provider whose state is a credential.
+      parent = self()
+
+      pid =
+        spawn(fn ->
+          Grok.handle_connect(nil, %{owner: parent})
+          Process.put(:token, "Bearer xai-SUPERSECRET")
+          send(parent, :ready)
+          receive do: (:never -> :ok)
+        end)
+
+      assert_receive :ready, 1_000
+      send(pid, {:conn, "Bearer xai-SUPERSECRET"})
+      Process.sleep(20)
+
+      assert {:messages, []} = Process.info(pid, :messages)
+      assert {:dictionary, []} = Process.info(pid, :dictionary)
+
+      Process.exit(pid, :kill)
+    end
+  end
+
   describe "endpoint_url/1" do
     test "the model rides in the query string, where a typo is silent" do
       # open/1's success path needs a live socket, but this half does not — and getting

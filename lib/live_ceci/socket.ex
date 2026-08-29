@@ -34,7 +34,7 @@ defmodule LiveCeci.Socket do
 
   require Logger
 
-  alias LiveCeci.Provider
+  alias LiveCeci.{Provider, Redact}
 
   @impl WebSock
   def init(_opts) do
@@ -64,7 +64,7 @@ defmodule LiveCeci.Socket do
         {:ok, %{session: session, provider: provider}}
 
       {:error, reason} ->
-        Logger.error("failed to open live session: #{inspect(reason)}")
+        Logger.error("failed to open live session: #{Redact.inspect(reason)}")
         # Close, don't linger. A socket left alive with session: nil sends every later
         # binary frame into the no-op clause below, and the browser's continuous mic
         # traffic keeps resetting the idle timeout — so it would never close on its own.
@@ -85,7 +85,7 @@ defmodule LiveCeci.Socket do
         {:ok, state}
 
       {:error, reason} ->
-        Logger.warning("send_audio failed: #{inspect(reason)}")
+        Logger.warning("send_audio failed: #{Redact.inspect(reason)}")
         {:ok, state}
     end
   end
@@ -144,28 +144,28 @@ defmodule LiveCeci.Socket do
   end
 
   def handle_info({:provider, {:error, reason}}, state) do
-    Logger.error("live session error: #{inspect(reason)}")
+    Logger.error("live session error: #{Redact.inspect(reason)}")
     {:push, error_frame(reason), state}
   end
 
   def handle_info({:provider, {:closed, reason}}, state) do
-    Logger.info("live session closed: #{inspect(reason)}")
+    Logger.info("live session closed: #{Redact.inspect(reason)}")
     {:stop, :normal, state}
   end
 
   def handle_info({:EXIT, pid, reason}, %{session: pid} = state) do
-    Logger.error("live session process exited: #{inspect(reason)}")
+    Logger.error("live session process exited: #{Redact.inspect(reason)}")
     {:stop, :normal, %{state | session: nil}}
   end
 
   def handle_info(msg, state) do
-    Logger.debug("socket: unhandled message #{inspect(msg)}")
+    Logger.debug("socket: unhandled message #{Redact.inspect(msg)}")
     {:ok, state}
   end
 
   @impl WebSock
   def terminate(reason, %{session: session, provider: provider}) do
-    Logger.info("ws closed (#{inspect(reason)})")
+    Logger.info("ws closed (#{Redact.inspect(reason)})")
     if session, do: provider.close(session)
     :ok
   end

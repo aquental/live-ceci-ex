@@ -125,6 +125,21 @@ defmodule LiveCeci.Provider.Grok do
   # ----------------------------------------------------------------- websockex
 
   @impl WebSockex
+  def handle_connect(_conn, state) do
+    # WebSockex keeps extra_headers — including "Authorization: Bearer <key>" — inside
+    # the %WebSockex.Conn{} it carries as process state, so ANY crash report for this
+    # process would print the credential. LiveCeci.Redact cannot help: those reports are
+    # written by the VM, not by our Logger calls.
+    #
+    # :sensitive is the VM's own answer. It tells the runtime to withhold this process's
+    # state, message queue and dictionary from crash reports and from Process.info, at
+    # the cost of making the process undebuggable by inspection. That is the right trade
+    # for a process whose entire state is a credential and a socket.
+    Process.flag(:sensitive, true)
+    {:ok, state}
+  end
+
+  @impl WebSockex
   def handle_frame({:text, raw}, state) do
     case Jason.decode(raw) do
       {:ok, event} ->
