@@ -40,8 +40,7 @@ Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"*
 | `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
 | `MAX_SESSIONS` | `8` | how many live sessions may exist at once. Each holds an upstream session that is billed while it lives, and eight tabs is eight of them |
 | `MAX_SESSIONS_PER_ADDRESS` | `4` | the same, per client address. Bound to loopback the two coincide; they stop coinciding the moment `BIND_IP` opens |
-| `MAX_TICKETS_PER_ADDRESS` | `150` | how many upgrade tickets one address may hold at once. On loopback that is one person; **behind a NAT or a reverse proxy it is everyone**, and then this — not `MAX_SESSIONS` — is what caps concurrent users. A load test found this the hard way: 50 clients, `MAX_SESSIONS=100`, and 28 refusals, all at the ticket desk |
-| `MAX_TICKETS` | `1000` | the global bound on outstanding tickets. Keep it **comfortably above** the per-address one — when the table is full the oldest is evicted, and if the two are close that eviction starts discarding tickets that were just issued. Measured at 150 against 200: two addresses filled the table and 100 live tickets were thrown away |
+| `MAX_TICKETS_PER_ADDRESS` | `150` | how many upgrade tickets one address may hold at once. On loopback that is one person; **behind a NAT or a reverse proxy it is everyone**, and then this — not `MAX_SESSIONS` — is what caps concurrent users. A load test found this the hard way: 50 clients, `MAX_SESSIONS=100`, and 28 refusals, all at the ticket desk. **The global bound is derived at 2×**, so the two cannot be raised out of step — at that ratio a third busy address evicts the first one's live tickets, which is the number to check before raising this in a deployment with many distinct clients |
 | `ALLOWED_ORIGINS` | — | extra origins allowed to open `/ws`, comma separated, exact `scheme://host:port`. Loopback is always allowed on any port and needs no listing |
 | `TURN_DETECTION` | `manual` | `manual` or `server` — who decides your turn ended. `manual` measured 833 ms faster on xAI and trades that against false turns. Gemini ignores it |
 | `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
@@ -252,15 +251,28 @@ sessions would cost money and would measure xAI's capacity rather than this serv
 The stub echoes each mic frame back as voice, so the downstream push and the shedding
 are exercised too.
 
-Fifty sessions, thirty seconds, 500 frames/second in aggregate:
+Ramped until something gave:
 
-```
-sessions    50/50 connected, 0 refused
-frames up   15000/15000 sent
-frames down 15000/15000 echoed back
-memory      2.9 MB total, 59.5 KB per session
-processes   2 left over
-```
+| clients | connected | frames up/down | KB per session |
+|---:|---:|---|---:|
+| 100 | 100/100 | 10k / 10k | 43.7 |
+| 400 | 400/400 | 40k / 40k | 17.0 |
+| 1000 | 1000/1000 | 100k / 100k | 12.9 |
+| 2000 | 2000/2000 | 200k / 200k | 9.0 |
+| 5000 | 4455/5000 | 356k / 356k | 6.1 |
+
+**Not one frame was dropped at any level**, including the one with refusals, and no
+process leaked at any level. Cost per session *falls* with scale — 43.7 KB to 6.1 KB —
+as the VM's fixed cost spreads.
+
+The 5000 run is the only one that refused anything, and the refusals are not this
+server: 544 of 545 were `WebSockex.ConnError`, i.e. the TCP connect. The accept backlog
+looked like the answer — ThousandIsland defaults to 1024 — but raising it to 16384 made
+it *worse*, 1155 refusals against 545. A real limit refuses a consistent number; that is
+noise. Past roughly 4000 clients this harness measures itself: client and server share
+one BEAM and one machine.
+
+So the honest statement is that **the ceiling was not found**, not that it is 4455.
 
 Nothing dropped either way, no backpressure fired, nothing leaked. At 59.5 KB a session
 a gigabyte holds roughly seventeen thousand of them — this server is not the ceiling.

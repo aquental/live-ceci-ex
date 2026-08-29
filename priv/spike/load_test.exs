@@ -82,7 +82,7 @@ defmodule Load do
   @frame_ms 100
 
   def run do
-    clients = LiveCeci.env_int("LOAD_CLIENTS", 50, 1..2_000)
+    clients = LiveCeci.env_int("LOAD_CLIENTS", 50, 1..20_000)
     seconds = LiveCeci.env_int("LOAD_SECONDS", 20, 1..600)
 
     start_apps()
@@ -184,15 +184,37 @@ defmodule Load do
     processes   #{after_.procs - before.procs} left over (0 is the answer)
     """)
 
+    reasons(results)
     verdict(ok, clients, sent, expected, received, after_.procs - before.procs)
   end
+
+  # WHY they were refused, not a guess. The first version of this reported "the cap or
+  # the ticket bound bit first" for every refusal, which it had no way of knowing — and
+  # at 5000 clients it was wrong: the caps were set to 10_000 and what actually failed
+  # was the connection itself.
+  defp reasons(results) do
+    grouped =
+      results
+      |> Enum.filter(&(&1.status == :refused))
+      |> Enum.frequencies_by(&classify(&1.reason))
+
+    for {reason, n} <- Enum.sort_by(grouped, &(-elem(&1, 1))) do
+      IO.puts("  refused #{String.pad_leading("#{n}", 5)}  #{reason}")
+    end
+
+    if grouped != %{}, do: IO.puts("")
+  end
+
+  defp classify({:no_ticket, _}), do: "could not mint a ticket (TCP to /ws-ticket failed)"
+  defp classify(:econnrefused), do: "TCP connection refused (listen backlog full)"
+  defp classify(:emfile), do: "out of file descriptors"
+  defp classify(%{__exception__: true} = e), do: "exception: #{inspect(e.__struct__)}"
+  defp classify(other), do: "upgrade rejected: #{inspect(other) |> String.slice(0, 60)}"
 
   defp verdict(ok, clients, sent, expected, received, leaked) do
     cond do
       ok < clients ->
-        IO.puts(
-          "VERDICT  #{clients - ok} sessions refused — the cap or the ticket bound bit first"
-        )
+        IO.puts("VERDICT  #{clients - ok} sessions refused — see the reasons above")
 
       sent < expected ->
         IO.puts(
@@ -263,7 +285,28 @@ defmodule Load do
     {:ok, socket} = :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true])
     {:ok, port} = :inet.port(socket)
     :gen_tcp.close(socket)
-    {:ok, _pid} = Bandit.start_link(plug: LiveCeci.Router, port: port, ip: {127, 0, 0, 1})
+    # The accept backlog. ThousandIsland defaults to 1024 (transports/tcp.ex:22), and at
+    # 5000 simultaneous connects the failures are all WebSockex.ConnError — TCP, not any
+    # cap in this app — so the backlog looked like the obvious ceiling.
+    #
+    # It is not. Raising it to 16384 made things WORSE: 1155 refusals against 545 at the
+    # default. A server-side limit would refuse a consistent number; that spread, in the
+    # wrong direction, is noise. Past roughly 4000 clients this harness stops measuring
+    # the server and starts measuring itself — client and server share one BEAM and one
+    # machine, and 5000 of each plus their WebSockex processes saturate the CPU before
+    # anything in lib/ notices.
+    #
+    # Kept as a knob because the refutation is worth being able to repeat.
+    backlog = LiveCeci.env_int("LOAD_BACKLOG", 1_024, 128..65_535)
+
+    {:ok, _pid} =
+      Bandit.start_link(
+        plug: LiveCeci.Router,
+        port: port,
+        ip: {127, 0, 0, 1},
+        thousand_island_options: [transport_options: [backlog: backlog]]
+      )
+
     port
   end
 
