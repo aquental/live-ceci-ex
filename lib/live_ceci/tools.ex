@@ -11,13 +11,31 @@ defmodule LiveCeci.Tools do
   or a real invoice would — the call has to move off this path, or the voice will stall
   mid-sentence while it waits.
 
-  ## The boundary is in the schema, not just the prompt
+  ## The boundary is in the schema — for the part of it a schema can hold
 
   Ceci is operational only, never clinical. A prompt asking the model not to collect
   clinical detail is one instruction among many; a parameter list with nowhere to PUT a
   diagnosis or a session note is structural. So every patient here is a `paciente`
-  documented as initials or a nickname, and no tool takes free text about a person.
+  bounded to `@patient_max` characters, `status` is an `enum`, and `dispatch/2` re-checks
+  both rather than trusting that the provider enforced them.
+
+  What that does NOT do — and an earlier version of this note overclaimed — is keep
+  clinical content off the wire. Every word spoken into the microphone reaches the
+  provider and is transcribed there, because that is what a voice agent is. The schema
+  governs what Ceci can WRITE DOWN and act on; it has no opinion on what she hears. If
+  the promise ever needs to cover transmission, it cannot be kept in this file.
   """
+
+  # The descriptions used to be the only thing saying this, and a description is a
+  # request. maxLength and enum are the same statements in a form the API validates and
+  # dispatch/2 re-checks — because neither the model nor the provider is obliged to honour
+  # a schema, and "iniciais ou apelido" is worth nothing if a full clinical note fits.
+  @patient_max 40
+  # Everything else is free text the person actually said — a date phrase, a month, an
+  # amount. Bounded because the model decides it and nothing else does, but bounded far
+  # above anything a human utters in one breath.
+  @free_text_max 200
+  @status_values ["compareceu", "faltou", "remarcou"]
 
   @declarations [
     %{
@@ -30,7 +48,8 @@ defmodule LiveCeci.Tools do
         properties: %{
           paciente: %{
             type: "string",
-            description: "iniciais ou apelido do paciente — nunca o nome completo"
+            description: "iniciais ou apelido do paciente — nunca o nome completo",
+            maxLength: @patient_max
           },
           quando: %{
             type: "string",
@@ -48,11 +67,13 @@ defmodule LiveCeci.Tools do
         properties: %{
           paciente: %{
             type: "string",
-            description: "iniciais ou apelido do paciente — nunca o nome completo"
+            description: "iniciais ou apelido do paciente — nunca o nome completo",
+            maxLength: @patient_max
           },
           status: %{
             type: "string",
-            description: "um de: compareceu, faltou, remarcou"
+            description: "um de: compareceu, faltou, remarcou",
+            enum: @status_values
           }
         },
         required: ["paciente", "status"]
@@ -66,7 +87,8 @@ defmodule LiveCeci.Tools do
         properties: %{
           paciente: %{
             type: "string",
-            description: "iniciais ou apelido do paciente — nunca o nome completo"
+            description: "iniciais ou apelido do paciente — nunca o nome completo",
+            maxLength: @patient_max
           },
           valor: %{type: "string", description: "o valor em reais, ex.: '250'"}
         },
@@ -127,7 +149,12 @@ defmodule LiveCeci.Tools do
     status = arg(args, :status)
 
     complete([paciente: paciente, status: status], fn ->
-      {%{action: "presenca", detail: join([paciente, status])}, %{result: "presença: #{status}"}}
+      if status in @status_values do
+        {%{action: "presenca", detail: join([paciente, status])},
+         %{result: "presença: #{status}"}}
+      else
+        {nil, %{result: "status tem de ser #{Enum.join(@status_values, ", ")}"}}
+      end
     end)
   end
 
@@ -169,13 +196,19 @@ defmodule LiveCeci.Tools do
   # this used to do — calls String.to_atom/1 on the voice path. The argument was always
   # a literal from the line above, so it was never an exhaustion risk, but the shape
   # invites one the first time somebody passes it a key the model chose.
-  defp arg(args, key) when is_map(args) and is_atom(key) do
+  # :paciente carries the tighter bound; every other field gets the free-text one. The
+  # limit is per field on purpose — an earlier version capped everything at 40 and
+  # quietly truncated "toda terça-feira do mês que vem às quatorze horas".
+  defp arg(args, :paciente = key), do: fetch(args, key, @patient_max)
+  defp arg(args, key), do: fetch(args, key, @free_text_max)
+
+  defp fetch(args, key, max) when is_map(args) and is_atom(key) do
     args
     |> Map.get(key, Map.get(args, Atom.to_string(key)))
-    |> coerce()
+    |> coerce(max)
   end
 
-  defp arg(_args, _key), do: ""
+  defp fetch(_args, _key, _max), do: ""
 
   # The model decides the VALUES too, and it does not always send a string. Declaring a
   # parameter `type: "string"` is a request, not a guarantee. Three shapes were measured
@@ -192,9 +225,44 @@ defmodule LiveCeci.Tools do
   # The silent two are worse than the crash. Numbers coerce, because a model emitting
   # `mes: 8` is being reasonable; anything structural becomes "" and the caller reports
   # it rather than guessing what was meant.
-  defp coerce(value) when is_binary(value), do: value
-  defp coerce(value) when is_integer(value) or is_float(value), do: to_string(value)
-  defp coerce(_other), do: ""
+  # Truncated, not rejected. An over-long field is the model misunderstanding the schema,
+  # not an attack, and refusing the whole turn over it would be worse UX than cutting it —
+  # but letting a clinical paragraph through in a field documented as initials is the one
+  # thing this app promises never to do.
+  # Two bounds, and the second one is not obvious.
+  #
+  # byte_size/1 is O(1) and UTF-8 never uses fewer bytes than characters, so a string
+  # already inside the limit is returned untouched without counting graphemes.
+  #
+  # The over-long path cannot call String.slice/3 directly: measured, it walks the WHOLE
+  # binary rather than stopping at `max` graphemes — 25_316 reductions for a 200_000-char
+  # argument, against 301 for binary_part. The model chooses that length, so that is
+  # unbounded work on the voice path, sitting behind a tool call that pauses her mid
+  # sentence. Cutting a byte prefix first bounds the whole thing by `max`: a UTF-8
+  # grapheme is at most 4 bytes, so max * 4 bytes always contains at least `max` of them.
+  defp coerce(value, max) when is_binary(value) do
+    if byte_size(value) <= max do
+      value
+    else
+      value
+      |> binary_part(0, min(byte_size(value), max * 4))
+      |> whole_graphemes()
+      |> String.slice(0, max)
+    end
+  end
+
+  defp coerce(value, _max) when is_integer(value) or is_float(value), do: to_string(value)
+  defp coerce(_other, _max), do: ""
+
+  # binary_part/3 counts bytes, so it can land in the middle of a multi-byte character
+  # and hand String.slice/3 invalid UTF-8. At most three bytes ever need dropping.
+  defp whole_graphemes(""), do: ""
+
+  defp whole_graphemes(binary) do
+    if String.valid?(binary),
+      do: binary,
+      else: whole_graphemes(binary_part(binary, 0, byte_size(binary) - 1))
+  end
 
   # arg/2 returns "" and never nil, so `valor && ...` here was dead truthiness the
   # compiler is right to reject.

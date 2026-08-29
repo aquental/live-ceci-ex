@@ -129,11 +129,20 @@ defmodule LiveCeci.ToolsTest do
     @budget_us 50_000
 
     test "no tool blocks the voice" do
+      # Best of three, not a single shot. This half exists to catch BLOCKING — a sleep, a
+      # GenServer.call, an HTTP request — and every one of those is slow on every run.
+      # A single measurement also sees whatever else the machine was doing that
+      # millisecond, which is not a property of this code. Taking the minimum keeps the
+      # signal and drops the noise, which is how you time anything.
       for {name, args} <- @cases do
-        {elapsed, _result} = :timer.tc(fn -> Tools.dispatch(name, args) end)
+        elapsed =
+          1..3
+          |> Enum.map(fn _ -> elem(:timer.tc(fn -> Tools.dispatch(name, args) end), 0) end)
+          |> Enum.min()
 
         assert elapsed < @budget_us,
-               "#{name} took #{elapsed}µs — a live tool call must return instantly or the voice stalls"
+               "#{name} took #{elapsed}µs at best of three — a live tool call must return " <>
+                 "instantly or the voice stalls"
       end
     end
 
@@ -146,6 +155,33 @@ defmodule LiveCeci.ToolsTest do
     # smaller than the cheapest thing the test exists to catch. Raising it to a
     # comfortable 150 would let a file read slip through unnoticed.
     @budget_reductions 90
+
+    test "the cost does not grow with the size of what the model sends" do
+      # The property that matters, and a flat budget cannot express it. The model chooses
+      # these strings; if the work is proportional to their length, a long one stalls her
+      # voice, because a live function call pauses it until the tool returns.
+      #
+      # This caught a real one. coerce/2 used String.slice/3 to truncate, which walks the
+      # WHOLE binary instead of stopping at the limit — 25_316 reductions for a 200_000
+      # character argument against 301 for binary_part. Bounding by a byte prefix first
+      # made it flat.
+      cost = fn chars ->
+        args = %{"paciente" => "M.S.", "quando" => String.duplicate("á", chars)}
+        {:reductions, before} = Process.info(self(), :reductions)
+        Tools.dispatch("agendar_sessao", args)
+        {:reductions, now} = Process.info(self(), :reductions)
+        now - before
+      end
+
+      small = cost.(200)
+      huge = cost.(2_000_000)
+
+      # Ten thousand times the input, and the work must not even double. Measured flat:
+      # 1219 -> 1643.
+      assert huge < small * 2,
+             "dispatch cost #{small} reductions on 200 characters and #{huge} on 2_000_000 — " <>
+               "the truncation is walking the input instead of bounding it"
+    end
 
     test "no tool does real work" do
       for {name, args} <- @cases do
