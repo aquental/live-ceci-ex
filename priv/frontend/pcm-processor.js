@@ -26,6 +26,7 @@ class PCMProcessor extends AudioWorkletProcessor {
     const opts = (options && options.processorOptions) || {};
     this._frameSamples = opts.frameSamples || DEFAULT_FRAME_SAMPLES;
     this._buf = new Int16Array(this._frameSamples);
+    this._scratch = new Float32Array(128); // one render quantum, decimation only shrinks
     this._len = 0;
     this._above = 0;                 // consecutive quanta over the gate
     this._open = false;              // true once this utterance has already been reported
@@ -36,27 +37,29 @@ class PCMProcessor extends AudioWorkletProcessor {
     if (!input || !input[0]) return true;
     const ch = input[0];
 
-    // naive linear decimation to 16k
-    const out = [];
+    // naive linear decimation to 16k, into a preallocated scratch buffer.
+    // process() runs ~375 times a second on the realtime audio thread; a fresh array and
+    // its push() growth every quantum is garbage the collector has to take back there,
+    // of all places. _scratch is sized once — a 128-sample quantum can never decimate to
+    // more than 128 samples, whatever the context rate.
+    const out = this._scratch;
+    let n = 0;
     let idx = this._frac;
     while (idx < ch.length) {
-      out.push(ch[Math.floor(idx)]);
+      out[n++] = ch[Math.floor(idx)];
       idx += this.ratio;
     }
     this._frac = idx - ch.length;
 
+    // One pass, not three: clamp, accumulate the RMS, and write the sample out.
     let sum = 0;
-    for (let i = 0; i < out.length; i++) {
+    for (let i = 0; i < n; i++) {
       const s = Math.max(-1, Math.min(1, out[i]));
-      out[i] = s;
       sum += s * s;
-    }
-    const rms = out.length ? Math.sqrt(sum / out.length) : 0;
-
-    for (let i = 0; i < out.length; i++) {
-      this._buf[this._len++] = out[i] < 0 ? out[i] * 0x8000 : out[i] * 0x7fff;
+      this._buf[this._len++] = s < 0 ? s * 0x8000 : s * 0x7fff;
       if (this._len === this._frameSamples) this._flush();
     }
+    const rms = n ? Math.sqrt(sum / n) : 0;
 
     if (rms >= this._bargeRms) {
       this._above++;

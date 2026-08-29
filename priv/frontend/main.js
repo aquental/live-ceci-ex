@@ -8,6 +8,9 @@ const orb = $("orb"), statusEl = $("status"), actEl = $("activity"), txEl = $("t
 // Measured: room noise crossed the old 0.02 gate at 0.021-0.023 and cut Ceci off mid
 // word; a deliberate interruption read 0.054. 0.04 sits between them.
 const BARGE_RMS = 0.04;
+// Roughly a second of 16 kHz PCM in flight. Past that the link is not keeping up.
+const MAX_BUFFERED = 32000;
+let dropped = 0;
 let ws, audioCtx, workletNode, micStream;
 // Server-owned settings, fetched once from /config.json. Null until then; go() waits
 // for it, because the worklet takes its batch size at construction and never re-reads it.
@@ -78,8 +81,9 @@ function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { setStatus("ouvindo…"); setOrb("listening"); };
+  ws.onopen = () => { dropped = 0; setStatus("ouvindo…"); setOrb("listening"); };
   ws.onclose = () => {
+    if (dropped) console.warn(`${dropped} mic frames dropped — the socket stopped draining`);
     setStatus("a linha caiu — toque para reconectar");
     setOrb("idle");
     stopVoice();                                                          // drop whatever was still queued
@@ -117,7 +121,14 @@ async function startMic() {
   });
   workletNode.port.onmessage = (e) => {
     // pcm arrives in ~100 ms batches; rms-only messages come between them for barge-in
-    if (e.data.pcm && ws && ws.readyState === WebSocket.OPEN) ws.send(e.data.pcm);
+    // bufferedAmount, not just readyState. A socket can be OPEN and not draining — bad
+    // wifi, a stalled server — and the mic never stops producing, so send() would grow
+    // the browser's own buffer without limit. Dropping the oldest frames is the right
+    // trade for live audio: stale mic is worth nothing, and the VAD recovers.
+    if (e.data.pcm && ws && ws.readyState === WebSocket.OPEN) {
+      if (ws.bufferedAmount > MAX_BUFFERED) dropped++;
+      else ws.send(e.data.pcm);
+    }
     if (e.data.barge && speaking) stopVoice();                             // client-side barge-in
   };
   source.connect(workletNode);
