@@ -17,3 +17,6 @@ erl_crash.dump
 *.swp
 *.swo
 priv/spike/bench_utterance.wav
+
+# plugin planning artifacts — local scratch, not shared state
+.claude/plans/
