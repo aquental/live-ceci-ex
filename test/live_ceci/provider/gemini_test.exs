@@ -189,8 +189,12 @@ defmodule LiveCeci.Provider.GeminiTest do
 
   describe "close/1" do
     test "tolerates an already-dead session" do
+      # monitor/DOWN rather than Process.sleep. Same reasoning as the Grok side: sleeping
+      # asserts that 20 ms is always enough, which is a claim about the machine.
       pid = spawn(fn -> :ok end)
-      Process.sleep(20)
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
+
       refute Process.alive?(pid)
       assert :ok = Subject.close(pid)
     end
