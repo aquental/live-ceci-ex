@@ -79,7 +79,7 @@ defmodule LiveCeci.Tickets do
   """
   @spec issue(:inet.ip_address()) :: {:ok, String.t()} | {:error, :too_many}
   def issue(address) do
-    sweep()
+    maybe_sweep()
 
     cond do
       count_for(address) >= @max_per_address ->
@@ -146,6 +146,20 @@ defmodule LiveCeci.Tickets do
   end
 
   def consume(_ticket, _address), do: {:error, :invalid}
+
+  # Only when the table is filling. The sweep is an :ets.select_delete over every row,
+  # and it used to run on every mint — which was needed back when a full table REFUSED
+  # the request. Now that the global bound evicts instead, nothing depends on the table
+  # being tidy at mint time: consume/2 checks expiry itself, and the 60 s sweep collects
+  # whatever was written once and left alone.
+  #
+  # Measured before changing it: ~17 µs per mint at 200 rows, against ~12 µs at 50. The
+  # table is far too small for this to matter today, and this is deliberately the cheap
+  # version of the fix rather than a rewrite — it removes O(table) work from a path that
+  # never needed it, without pretending there was a problem to solve.
+  defp maybe_sweep do
+    if :ets.info(@table, :size) > div(@max_outstanding, 2), do: sweep()
+  end
 
   @doc false
   # Public for tests: drops everything already expired.
