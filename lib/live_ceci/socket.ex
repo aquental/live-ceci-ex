@@ -28,12 +28,12 @@ defmodule LiveCeci.Socket do
   `send_client_content/3` — live audio is a stream, not a discrete turn, and the wrong
   one leaves the model never hearing you. See `handle_in/2`.
 
-  ## The wire contract (identical to the Python server, so the frontend is unchanged)
+  ## The wire contract
 
   Browser -> server: binary frames of 16 kHz mono PCM s16le.
   Server -> browser: binary frames of 24 kHz PCM (voice), plus JSON text frames:
     `{"type":"transcript","role":"user"|"ceci","text":...}`
-    `{"type":"play","action":"playlist"|"track"|"skip"|"pause","value":...}`
+    `{"type":"action","action":"agendar"|"presenca"|"recibo"|"resumo","detail":...}`
     `{"type":"interrupted"}`
     `{"type":"error","message":...}`
   """
@@ -115,9 +115,9 @@ defmodule LiveCeci.Socket do
     {:push, json(%{type: "transcript", role: transcript_role(role), text: text}), state}
   end
 
-  # A tool call decided a music command; forward it to the browser's player.
-  def handle_info({:provider, {:play, command}}, state) do
-    {:push, json(Map.put(command, :type, "play")), state}
+  # A tool call decided something; forward it to the browser's activity panel.
+  def handle_info({:provider, {:action, command}}, state) do
+    {:push, json(Map.put(command, :type, "action")), state}
   end
 
   def handle_info({:provider, {:error, reason}}, state) do
@@ -158,7 +158,7 @@ defmodule LiveCeci.Socket do
   # URL with the API key in it. The detail stays in the log — both call sites log it —
   # and the client gets a fixed string.
   defp error_frame(_reason) do
-    json(%{type: "error", message: "the line dropped — try again"})
+    json(%{type: "error", message: "a linha caiu — tente de novo"})
   end
 
   # WebSock takes a list of frames; keeping every builder list-shaped makes them

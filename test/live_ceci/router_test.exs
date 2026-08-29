@@ -64,38 +64,22 @@ defmodule LiveCeci.RouterTest do
       assert conn.resp_body =~ "live-ceci"
     end
 
-    test "the browser can fetch the track catalogue it drives the player from" do
-      conn = call(conn(:get, "/assets/tracks.json"))
-
-      assert conn.status == 200
-      assert [%{"title" => _, "file" => _} | _] = Jason.decode!(conn.resp_body)
-    end
-
-    test "the audio files the player streams are still served" do
-      conn = call(conn(:get, "/assets/tracks/01-song.mp3"))
-
-      assert conn.status == 200
-    end
-
-    # priv/assets mixes two audiences: media the browser fetches, and ceci_persona.txt,
-    # which only the compiler reads (LiveCeci.Persona inlines it via @external_resource).
-    # Plug.Static cannot tell them apart on its own, so the allowlist is what keeps the
-    # system prompt off the wire.
+    # priv/assets is no longer routed at all. It used to serve four mp3s to the music
+    # player behind an `only:` allowlist, because the same directory holds
+    # ceci_persona.txt — the system prompt. With the tools operational, nothing in the
+    # browser fetches from there, and not routing to a directory beats allowlisting
+    # around the one file in it that must never ship.
     test "the persona prompt is not reachable over HTTP" do
       conn = call(conn(:get, "/assets/ceci_persona.txt"))
 
       assert conn.status == 404
-      refute conn.resp_body =~ "midnight"
+      refute conn.resp_body =~ "operacional"
     end
-  end
 
-  describe "/ws upgrade" do
-    test "upgrades to the socket handler with the framing limits" do
-      call(ws_conn())
-
-      assert_receive {_ref, :upgrade, {:websocket, {LiveCeci.Socket, [], opts}}}
-      assert opts[:timeout] == 60_000
-      assert opts[:max_frame_size] == 1_000_000
+    test "nothing under /assets is served any more, not even what used to be public" do
+      for path <- ["/assets/tracks.json", "/assets/tracks/01-song.mp3"] do
+        assert call(conn(:get, path)).status == 404
+      end
     end
   end
 end

@@ -9,10 +9,21 @@ defmodule LiveCeci.PersonaTest do
     assert String.length(instruction) > 200
   end
 
-  test "carries both halves: who Ceci is, and that she is now live" do
+  test "carries all three halves: who she is, what she will not touch, and that she is live" do
     instruction = Persona.instruction()
-    assert instruction =~ "You are Ceci, a late-night radio DJ."
-    assert instruction =~ "You are now LIVE"
+    assert instruction =~ "Você é a Ceci, assistente operacional"
+    assert instruction =~ "só o operacional, nunca o clínico"
+    assert instruction =~ "Você está AO VIVO"
+  end
+
+  test "the boundary is spelled out, not implied" do
+    # The single most load-bearing sentence in the prompt: ceci.pro's whole promise is
+    # that clinical content never reaches her. Softening this to a hint is a product
+    # change, and it should have to break a test to happen.
+    instruction = Persona.instruction()
+    assert instruction =~ "não lê"
+    assert instruction =~ "prontuário"
+    assert instruction =~ "iniciais ou apelido"
   end
 
   test "names every tool the model is allowed to call" do

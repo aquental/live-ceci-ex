@@ -61,14 +61,14 @@ defmodule LiveCeci.SocketTest do
   end
 
   describe "tool commands" do
-    test "the play command reaches the browser as the frontend's play message" do
+    test "the action reaches the browser as the frontend's action message" do
       assert {:push, [{:text, json}], _state} =
                Socket.handle_info(
-                 {:provider, {:play, %{action: "track", value: "porcelain"}}},
+                 {:provider, {:action, %{action: "recibo", detail: "M.S. · R$ 250"}}},
                  state()
                )
 
-      assert %{"type" => "play", "action" => "track", "value" => "porcelain"} =
+      assert %{"type" => "action", "action" => "recibo", "detail" => "M.S. · R$ 250"} =
                Jason.decode!(json)
     end
   end
@@ -79,7 +79,7 @@ defmodule LiveCeci.SocketTest do
                Socket.handle_info({:provider, {:error, :boom}}, state())
 
       assert %{"type" => "error", "message" => message} = Jason.decode!(json)
-      assert message == "the line dropped — try again"
+      assert message == "a linha caiu — tente de novo"
     end
 
     test "the error frame does not leak the upstream reason to the browser" do

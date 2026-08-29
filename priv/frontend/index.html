@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-BR">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>live-ceci · with ceci</title>
+<title>live-ceci</title>
 <style>
   :root { --peach:#FFB89E; --lav:#A78BC9; --ink:#e8e0d4; }
   * { box-sizing: border-box; }
@@ -32,7 +32,9 @@
   .status { font-style: italic; font-size: 14px; color: rgba(232,224,212,0.6); min-height: 20px; }
   .info { width: 100%; padding: 18px 28px 28px;
     background: linear-gradient(to top, rgba(15,11,10,0.9), transparent); text-align: center; }
-  .now { font-size: 12px; letter-spacing: 0.06em; color: rgba(232,224,212,0.55); min-height: 16px; }
+  .activity { max-width: 520px; margin: 0 auto; max-height: 72px; overflow-y: auto;
+    font-size: 12px; letter-spacing: 0.04em; line-height: 1.7; color: var(--peach); text-align: left; }
+  .act::before { content: "✓ "; opacity: 0.6; }
   .transcript { max-width: 520px; margin: 10px auto 0; max-height: 96px; overflow-y: auto;
     font-size: 12px; line-height: 1.7; color: rgba(232,224,212,0.5); text-align: left; }
   .line.ceci { color: var(--peach); }
@@ -44,21 +46,20 @@
 </style>
 </head>
 <body>
-  <div class="chrome"><span>live-ceci</span><span>with ceci</span><span>bedroom pop</span></div>
+  <div class="chrome"><span>live-ceci</span><span>assistente operacional</span><span>nunca o clínico</span></div>
 
   <div class="stage">
     <div id="orb" class="orb idle"></div>
-    <div id="status" class="status">tap the mic, then talk to ceci</div>
+    <div id="status" class="status">toque no microfone e fale com a ceci</div>
   </div>
 
   <div class="info">
-    <div id="nowplaying" class="now"></div>
+    <div id="activity" class="activity"></div>
     <div id="transcript" class="transcript"></div>
-    <button id="talk">🎙 talk</button>
-    <div class="hint">headphones on — or she hears her own radio</div>
+    <button id="talk">🎙 falar</button>
+    <div class="hint">fone de ouvido — ou ela escuta a própria voz</div>
   </div>
 
-  <audio id="music" loop></audio>
   <script src="/main.js"></script>
 </body>
 </html>

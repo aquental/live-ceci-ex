@@ -79,7 +79,7 @@ defmodule LiveCeci.SocketLifecycleTest do
       refute json =~ "AIzaSyFAKE"
       refute json =~ "403"
 
-      assert %{"type" => "error", "message" => "the line dropped — try again"} =
+      assert %{"type" => "error", "message" => "a linha caiu — tente de novo"} =
                Jason.decode!(json)
     end
   end

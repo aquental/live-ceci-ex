@@ -9,11 +9,11 @@ defmodule LiveCeci.Router do
 
   use Plug.Router
 
-  # Ceci's four dream-pop tracks and the catalogue the browser fetches. `only:` is an
-  # allowlist, not a blocklist, because priv/assets also holds ceci_persona.txt — the
-  # system prompt, which only the compiler reads. Anything added here stays private
-  # until it is named on this line.
-  plug Plug.Static, at: "/assets", from: {:live_ceci, "priv/assets"}, only: ~w(tracks tracks.json)
+  # There is deliberately no Plug.Static over priv/assets. It used to serve four mp3s to
+  # the music player; with the tools operational, nothing in the browser fetches from
+  # there any more — and what remains in that directory is ceci_persona.txt, the system
+  # prompt, which only the compiler reads. An allowlist protecting one private file is
+  # weaker than not routing to it at all.
 
   # index.html / main.js / pcm-processor.js
   plug Plug.Static, at: "/", from: {:live_ceci, "priv/frontend"}, index: ["index.html"]

@@ -197,43 +197,50 @@ defmodule LiveCeci.Provider.GeminiTest do
   end
 
   describe "tool calls" do
-    test "a play_playlist call emits a command AND answers the model instantly" do
+    test "a tool call emits an action AND answers the model instantly" do
       tool_call = %ToolCall{
-        function_calls: [%{id: "call_1", name: "play_playlist", args: %{"mood" => "dream pop"}}]
+        function_calls: [
+          %{id: "call_1", name: "emitir_recibo", args: %{"paciente" => "M.S.", "valor" => "250"}}
+        ]
       }
 
-      assert {:tool_response, [%{id: "call_1", name: "play_playlist", response: %{result: "ok"}}]} =
+      assert {:tool_response,
+              [%{id: "call_1", name: "emitir_recibo", response: %{result: "recibo emitido"}}]} =
                Subject.handle_tool_call(tool_call, self())
 
-      assert_received {:provider, {:play, %{action: "playlist", value: "dream pop"}}}
+      assert_received {:provider, {:action, %{action: "recibo", detail: "M.S. · R$ 250"}}}
     end
 
     test "several calls in one batch are all dispatched, in order" do
       tool_call = %ToolCall{
         function_calls: [
-          %{id: "a", name: "play_playlist", args: %{"mood" => "lofi"}},
-          %{id: "b", name: "skip", args: %{}}
+          %{
+            id: "a",
+            name: "confirmar_presenca",
+            args: %{"paciente" => "R.L.", "status" => "faltou"}
+          },
+          %{id: "b", name: "resumo_mensal", args: %{"mes" => "agosto"}}
         ]
       }
 
       assert {:tool_response, [%{id: "a"}, %{id: "b"}]} =
                Subject.handle_tool_call(tool_call, self())
 
-      assert_received {:provider, {:play, %{action: "playlist", value: "lofi"}}}
-      assert_received {:provider, {:play, %{action: "skip"}}}
+      assert_received {:provider, {:action, %{action: "presenca", detail: "R.L. · faltou"}}}
+      assert_received {:provider, {:action, %{action: "resumo", detail: "agosto"}}}
     end
 
-    test "an unknown tool still answers the model, but emits no play command" do
+    test "an unknown tool still answers the model, but emits no action" do
       tool_call = %ToolCall{function_calls: [%{id: "x", name: "teleport", args: %{}}]}
 
       assert {:tool_response, [%{id: "x", response: %{result: "unknown tool: teleport"}}]} =
                Subject.handle_tool_call(tool_call, self())
 
-      refute_received {:provider, {:play, _command}}
+      refute_received {:provider, {:action, _command}}
     end
 
     test "nil args do not crash the turn" do
-      tool_call = %ToolCall{function_calls: [%{id: "y", name: "skip", args: nil}]}
+      tool_call = %ToolCall{function_calls: [%{id: "y", name: "resumo_mensal", args: nil}]}
       assert {:tool_response, [%{id: "y"}]} = Subject.handle_tool_call(tool_call, self())
     end
   end

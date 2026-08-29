@@ -1,6 +1,6 @@
 # live-ceci-ex — a voice agent you can interrupt, in Elixir
 
-Talk to **Ceci**, a late-night radio DJ. Ask her to play something. Talk over her mid-sentence and she stops, listens, and picks the thread back up.
+Talk to **Ceci**, the operational assistant from [ceci.pro](https://ceci.pro): she takes the admin side of a therapy practice — scheduling, attendance, receipts, the accountant's monthly summary — and never touches the clinical side. Talk over her mid-sentence and she stops, listens, and picks the thread back up.
 
 An Elixir port of [`live-dj`](../live-dj) — the demo from **EP1 of the Multimodal Agents Cookbook**. **No Phoenix and no agent framework**, so the whole primitive stays visible.
 
@@ -17,9 +17,9 @@ mix deps.get
 mix run --no-halt
 ```
 
-Open <http://localhost:8000>, **put headphones on** (otherwise she hears her own radio), tap 🎙 and talk.
+Open <http://localhost:8000>, **put headphones on** (otherwise she hears her own voice), tap 🎙 and talk — in Portuguese; her instruction and her tools are pt-BR.
 
-Try: *"hey Ceci"* · *"can you play something dream pop"* · *"skip this"* — then **talk over her** while she's speaking.
+Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"* · *"fecha o resumo de agosto"* — then **talk over her** while she's speaking. Ask her something clinical and she should decline and steer back.
 
 ### Configuration
 
@@ -71,7 +71,7 @@ What it does *not* do any more is know which API answered. [`LiveCeci.Provider`]
 
 ```
 {:voice, pcm}   :interrupted   {:transcript, :user | :ceci, text}
-{:play, cmd}    {:error, _}    {:closed, _}
+{:action, cmd}  {:error, _}    {:closed, _}
 ```
 
 The two wire formats disagree about nearly everything — Gemini pushes typed structs through callbacks and takes audio by reference; xAI speaks a JSON event protocol and takes raw binary frames — so neither vocabulary makes a good lingua franca. Providers translate into the set above, and decoding is theirs: by the time a frame reaches the socket it is PCM, not base64 and not a struct.
@@ -86,7 +86,7 @@ The Python original exists to teach a bug: `session.receive()` is a **per-turn**
 
 Its sibling **does** survive, in [`LiveCeci.Socket`](lib/live_ceci/socket.ex): mic audio goes to `send_realtime_input`, **not** `send_client_content`. `send_client_content` is for seeding history before the conversation; point the mic at it and the live turn never fires, so you get dead air.
 
-And the rule that governs [`LiveCeci.Tools`](lib/live_ceci/tools.ex): live function calls are **synchronous**, so the model's voice is paused until your tool returns. `dispatch/2` is therefore a plain function over plain data — no GenServer call, no HTTP, no `Task.await`. It decides a command, hands it to the socket process, and returns `%{result: "ok"}` in the same breath. `test/live_ceci/tools_test.exs` fails if one starts doing real work.
+And the rule that governs [`LiveCeci.Tools`](lib/live_ceci/tools.ex): live function calls are **synchronous**, so the model's voice is paused until your tool returns. `dispatch/2` is therefore a plain function over plain data — no GenServer call, no HTTP, no `Task.await`. It decides an action, hands it to the socket process, and answers the model in the same breath. `test/live_ceci/tools_test.exs` fails if one starts doing real work — which matters more now that the tools are called `agendar_sessao` and `emitir_recibo` and *sound* like they should hit a database.
 
 ## Why no Phoenix
 
@@ -107,14 +107,12 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `lib/live_ceci/live_session.ex` | the one upstream Gemini call, with its own timeout and `catch :exit` — a stalled session must not take the listener down |
 | `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written — including whether manual turn detection beats server VAD |
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
-| `lib/live_ceci/tools.ex` | `play_playlist` / `play_track` / `skip` / `pause` — they return **instantly**, so the voice never stalls |
+| `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
 | `config/runtime.exs` | the `.env` reader and the API-key aliasing |
-| `priv/frontend/` | the browser client, **copied unchanged** from the Python repo |
-| `priv/assets/tracks/` · `priv/assets/tracks.json` | four dream-pop tracks and the catalogue the browser fetches |
-
-The frontend is byte-identical to the Python original: the WebSocket contract did not change, so nothing needed porting.
+| `priv/assets/tracks/` · `priv/assets/tracks.json` | four dream-pop tracks, orphaned by the tool swap — nothing routes to them any more |
+| `priv/frontend/` | the browser client: mic worklet, voice playback, transcript, and the activity panel |
 
 Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
 
@@ -125,7 +123,6 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 | Route | |
 |---|---|
 | `GET /` · `GET /main.js` · `GET /pcm-processor.js` | the client, served from `priv/frontend` |
-| `GET /assets/*` | `tracks.json` and the four mp3s, from `priv/assets` |
 | `GET /healthz` | `200 ok` |
 | `GET /config.json` | `{"frameSamples":N}` — the only channel between `FRAME_SAMPLES` in `.env` and the AudioWorklet that applies it |
 | `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame |
@@ -217,12 +214,12 @@ threw outliers at 1130, 1216 and 1740 ms (sd 236) where Gemini stayed between 77
 
 ## The WebSocket contract
 
-`WS /ws` — unchanged from the Python server.
+`WS /ws` — the whole contract.
 
 - **Browser → server:** binary frames, 16 kHz mono PCM s16le. Text frames are accepted and ignored; the contract reserves them for `{"type":"start"|"stop"}`, which the client doesn't send today.
 - **Server → browser:** binary frames of 24 kHz PCM (voice), plus JSON text frames:
   `{"type":"transcript","role":"user"|"ceci","text":…}` ·
-  `{"type":"play","action":"playlist"|"track"|"skip"|"pause","value":…}` ·
+  `{"type":"action","action":"agendar"|"presenca"|"recibo"|"resumo","detail":…}` ·
   `{"type":"interrupted"}` · `{"type":"error","message":…}`
 
 Empty transcripts are dropped rather than drawn as blank lines, and a text-only model part pushes nothing — this agent speaks, it does not type.
@@ -235,19 +232,19 @@ mix format --check-formatted
 mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-**123 tests, no network:**
+**126 tests, no network:**
 
 | | |
 |---|---|
 | `provider/grok_test.exs` (33) | xAI events in, neutral events out — binary voice and the base64 fallback, barge-in, transcripts, tool dispatch, the session shape including the configurable silence budget, and that the tool reply goes out by `cast`, because `WebSockex.send_frame/3` **raises** when the caller is the socket process |
 | `provider/gemini_test.exs` (25) | real `gemini_ex` structs in, neutral events out — the assertions that lived in `socket_test.exs` before the seam existed, plus the session options the API actually reads |
 | `socket_test.exs` (14) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, plus a stub provider proving the upstream call goes through whichever one is configured |
-| `tools_test.exs` (12) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, and the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work, and neither catches both |
+| `tools_test.exs` (16) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work — and that no tool declares a parameter clinical content could hide in |
 | `live_ceci_test.exs` (12) | `config/0` reads at call time so a boot-time override wins, the test VM asks the OS for a port, `pt_BR` normalises to `pt-BR`, and `env_int/3` falls back **loudly** on every plausible `.env` typo |
-| `router_test.exs` (9) | `/healthz`, `/config.json`, the 404 catch-all, the static client, the track catalogue and audio files — and that `priv/assets/ceci_persona.txt` is **not** reachable over HTTP |
+| `router_test.exs` (7) | `/healthz`, `/config.json`, the 404 catch-all, the static client — and that nothing under `/assets` is reachable, `ceci_persona.txt` least of all |
 | `socket_lifecycle_test.exs` (6) | the socket opened and closed for real over TCP, so `terminate/2` actually runs — the path that leaked billed provider sessions when it did not |
 | `agent_name_test.exs` (5) | the agent is Ceci, in the instruction, in the `:ceci` atom, in the `"ceci"` role on the wire, and nowhere in `lib/` or `priv/frontend` under the old name |
-| `persona_test.exs` (4) | the instruction loads, carries both halves, names every callable tool, and is shaped as the `Content` the setup message expects |
+| `persona_test.exs` (5) | the instruction loads, carries who she is / what she will not touch / that she is live, names every callable tool, and is shaped as the `Content` the setup message expects |
 | `live_session_test.exs` (3) | a stalled or dead session comes back as `{:error, {:exit, _}}` and the caller stays alive — the guardrail on the one call that sits in the audio path |
 
 Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a dummy API key so config validation passes without one.
@@ -257,5 +254,5 @@ Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a
 - **Voice** is a Gemini Live *native* voice (`LIVE_VOICE`, default `Aoede`) — the Live API has its own voice set, so it can't reproduce a TTS voice you used elsewhere. The persona carries the character, not the timbre.
 - **Barge-in** is client-side: the browser cuts playback the instant the mic hears you (RMS gate at `0.02` in `priv/frontend/main.js`). The server forwards `interrupted` too.
 - **Mic framing.** The worklet batches PCM into ~100 ms frames rather than emitting one per 128-sample render quantum — at 48 kHz that was 375 WebSocket frames/sec of ~85 bytes, where framing overhead dwarfed the audio. Barge-in can't wait for the batch, so a quantum that crosses the gate posts an RMS-only message immediately and the cut stays instant.
-- **Ducking** is client-side as well: the music drops to 12 % while Ceci talks and comes back 450 ms after she stops.
+- **The activity panel** is the browser's only proof the round trip closed: her voice says she booked it, the panel says the tool call actually came back.
 - **Concurrency** is where the port pays off. The Python design doc lists *"what breaks at 10× concurrent: one process holding N sessions saturates."* Here each listener is an isolated, supervised process; one dropped call never touches another.

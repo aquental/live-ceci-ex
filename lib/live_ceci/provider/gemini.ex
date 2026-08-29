@@ -89,7 +89,7 @@ defmodule LiveCeci.Provider.Gemini do
     responses =
       Enum.map(calls, fn %{id: id, name: name} = call ->
         {command, result} = LiveCeci.Tools.dispatch(name, call.args || %{})
-        if command, do: send(owner, {:provider, {:play, command}})
+        if command, do: send(owner, {:provider, {:action, command}})
         %{id: id, name: name, response: result}
       end)
 

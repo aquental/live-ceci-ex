@@ -14,7 +14,7 @@ defmodule LiveCeci.Provider do
       {:provider, {:voice, pcm}}                       # 24 kHz s16le, already decoded
       {:provider, :interrupted}                        # drop whatever audio is queued
       {:provider, {:transcript, :user | :ceci, text}}
-      {:provider, {:play, command}}                    # a tool decided a player command
+      {:provider, {:action, command}}                  # a tool decided something to show
       {:provider, {:error, reason}}
       {:provider, {:closed, reason}}
 
@@ -28,7 +28,7 @@ defmodule LiveCeci.Provider do
   messages sent back over the socket. A shared `send_tool_result/3` would fit one and
   be dead weight in the other, and routing tool calls through the socket process would
   make the Gemini path impossible. So each provider calls `LiveCeci.Tools.dispatch/2`
-  itself and emits `{:play, command}` — the decision stays shared, only the handshake
+  itself and emits `{:action, command}` — the decision stays shared, only the handshake
   differs.
 
   Both APIs pause the model's voice until the result comes back, which is why

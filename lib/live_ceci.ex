@@ -2,8 +2,10 @@ defmodule LiveCeci do
   @moduledoc """
   live-ceci — a voice agent you can interrupt.
 
-  Talk to Ceci, a late-night radio DJ. Ask her to play something. Talk over her
-  mid-sentence and she stops, listens, and picks the thread back up.
+  Talk to Ceci, the operational assistant from ceci.pro: she takes the admin side of a
+  therapy practice — scheduling, attendance, receipts, the accountant's summary — and
+  leaves the clinical side alone. Talk over her mid-sentence and she stops, listens, and
+  picks the thread back up.
 
   Built on the Gemini Live API via `gemini_ex` — no agent framework, no Phoenix,
   so the whole primitive stays visible. An Elixir port of the EP1 demo from the
@@ -12,7 +14,7 @@ defmodule LiveCeci do
   The pieces:
 
     * `LiveCeci.Socket`  — the bridge: one browser socket, one Live session
-    * `LiveCeci.Tools`   — the music-control function calls (they return instantly)
+    * `LiveCeci.Tools`   — the four operational function calls (they return instantly)
     * `LiveCeci.Persona` — who Ceci is
     * `LiveCeci.Router`  — the WebSocket upgrade + static files
   """

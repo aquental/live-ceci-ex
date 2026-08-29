@@ -173,7 +173,7 @@ defmodule LiveCeci.Provider.Grok do
          owner
        ) do
     {command, result} = LiveCeci.Tools.dispatch(name, decode_args(args))
-    if command, do: send(owner, {:provider, {:play, command}})
+    if command, do: send(owner, {:provider, {:action, command}})
     tool_result_payloads(id, result)
   end
 

@@ -24,12 +24,12 @@ defmodule LiveCeci.AgentNameTest do
 
   describe "the agent is named Ceci" do
     test "the system instruction tells the model who she is" do
-      assert Persona.instruction() =~ "You are #{@name}, a late-night radio DJ."
+      assert Persona.instruction() =~ "Você é a #{@name}, assistente operacional"
     end
 
     test "the Content struct carries the same name — it is the one the API reads" do
       assert %{parts: [%{text: text}]} = Persona.system_instruction()
-      assert text =~ "You are #{@name},"
+      assert text =~ "Você é a #{@name},"
     end
 
     test "her transcripts reach the browser tagged \"ceci\"" do
@@ -49,7 +49,7 @@ defmodule LiveCeci.AgentNameTest do
     # Scoped to the code that runs, not to docs or tests: those may legitimately
     # discuss the rename, and a guard that forbids naming the old name would forbid
     # explaining it.
-    @roots ["lib", "priv/frontend", "priv/assets/tracks.json"]
+    @roots ["lib", "priv/frontend", "priv/assets/ceci_persona.txt"]
 
     test "the shipped code and the browser client never say the old name" do
       offenders =

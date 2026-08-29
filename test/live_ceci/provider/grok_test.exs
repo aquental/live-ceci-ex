@@ -82,12 +82,12 @@ defmodule LiveCeci.Provider.GrokTest do
       assert {:ok, _state} =
                frame(%{
                  type: "response.function_call_arguments.done",
-                 name: "play_playlist",
+                 name: "emitir_recibo",
                  call_id: "call_1",
-                 arguments: ~s({"mood":"dream pop"})
+                 arguments: ~s({"paciente":"M.S.","valor":"250"})
                })
 
-      assert_received {:provider, {:play, %{action: "playlist", value: "dream pop"}}}
+      assert_received {:provider, {:action, %{action: "recibo", detail: "M.S. · R$ 250"}}}
     end
 
     test "the result goes back as two casts, because one message is not enough" do
@@ -96,7 +96,7 @@ defmodule LiveCeci.Provider.GrokTest do
       assert {:ok, _state} =
                frame(%{
                  type: "response.function_call_arguments.done",
-                 name: "skip",
+                 name: "resumo_mensal",
                  call_id: "call_2",
                  arguments: "{}"
                })
@@ -107,7 +107,7 @@ defmodule LiveCeci.Provider.GrokTest do
       assert_received {:"$websockex_cast", {:send, %{type: "response.create"}}}
     end
 
-    test "an unknown tool still answers the model, but emits no play command" do
+    test "an unknown tool still answers the model, but emits no action" do
       assert {:ok, _state} =
                frame(%{
                  type: "response.function_call_arguments.done",
@@ -116,7 +116,7 @@ defmodule LiveCeci.Provider.GrokTest do
                  arguments: "{}"
                })
 
-      refute_received {:provider, {:play, _}}
+      refute_received {:provider, {:action, _}}
       assert_received {:"$websockex_cast", {:send, %{type: "conversation.item.create"}}}
     end
 
@@ -124,12 +124,12 @@ defmodule LiveCeci.Provider.GrokTest do
       assert {:ok, _state} =
                frame(%{
                  type: "response.function_call_arguments.done",
-                 name: "play_playlist",
+                 name: "resumo_mensal",
                  call_id: "call_4",
                  arguments: "{not json"
                })
 
-      assert_received {:provider, {:play, %{action: "playlist", value: ""}}}
+      assert_received {:provider, {:action, %{action: "resumo", detail: ""}}}
     end
 
     test "the reply is a cast, not a direct send_frame" do
@@ -230,7 +230,7 @@ defmodule LiveCeci.Provider.GrokTest do
       assert Enum.all?(s.tools, &(&1.name && &1.description && &1.parameters))
 
       assert Enum.map(s.tools, & &1.name) |> Enum.sort() ==
-               ["pause", "play_playlist", "play_track", "skip"]
+               ["agendar_sessao", "confirmar_presenca", "emitir_recibo", "resumo_mensal"]
     end
 
     test "the persona goes as a bare string, not Gemini's Content struct", %{session: s} do
