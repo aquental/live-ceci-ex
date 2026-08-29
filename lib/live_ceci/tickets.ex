@@ -33,8 +33,23 @@ defmodule LiveCeci.Tickets do
   Its real value now is that it is the seam. When there is an identity to check, it is
   checked in `issue/1` and everything downstream already carries the consequence.
 
-  `@max_outstanding` is not a rate limit — it is the bound that stops an unauthenticated
-  endpoint growing a table without end.
+  ## The bound, and the denial of service it used to be
+
+  `@max_outstanding` stops an unauthenticated endpoint growing a table without end. The
+  first version enforced it globally and refused the NEWEST request, which turned a
+  memory bound into an availability weapon: 200 mints from one address filled the table
+  and every other user got `{:error, :too_many}` — reproduced, not theorised. It cleared
+  30 seconds later when the tickets expired, so it was a denial for the duration of the
+  flood rather than a permanent one, which is not much of a defence.
+
+  Two changes fix it, and both matter:
+
+    * **Per address.** One address can hold `@max_per_address` at a time and no more, so
+      filling the table from one place is no longer possible.
+    * **Evict oldest.** If the table is somehow still full, the oldest ticket goes rather
+      than the newest being refused. A ticket already near its expiry is worth less than
+      the request in front of you, and refusing the newcomer is what let an attacker who
+      arrived first keep everyone else out.
   """
 
   use GenServer
@@ -44,6 +59,12 @@ defmodule LiveCeci.Tickets do
   @table __MODULE__
   @ttl_ms 30_000
   @max_outstanding 200
+  # A browser needs one ticket per connection, and a ticket that is minted but never
+  # presented still occupies a slot for its full TTL — a failed connect, a closed tab
+  # between the fetch and the upgrade. Twenty in thirty seconds is already well past a
+  # reconnect loop with any backoff at all, and it still takes ten cooperating addresses
+  # to reach the global bound, where eviction takes over.
+  @max_per_address 20
   @sweep_every_ms 60_000
 
   # 32 bytes. Long enough that guessing is not a strategy, short enough for a URL.
@@ -60,15 +81,44 @@ defmodule LiveCeci.Tickets do
   def issue(address) do
     sweep()
 
-    if :ets.info(@table, :size) >= @max_outstanding do
-      Logger.warning("refusing to issue a ws ticket: #{@max_outstanding} already outstanding")
-      {:error, :too_many}
-    else
-      ticket = @bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-      :ets.insert(@table, {ticket, now() + @ttl_ms, address})
-      {:ok, ticket}
+    cond do
+      count_for(address) >= @max_per_address ->
+        # The bound that actually stops the flood, because it is scoped to whoever is
+        # flooding. Refusing here denies one address, not everyone.
+        Logger.warning(
+          "refusing a ws ticket for #{:inet.ntoa(address)}: " <>
+            "#{@max_per_address} already outstanding from there"
+        )
+
+        {:error, :too_many}
+
+      true ->
+        # Global backstop. Evicts rather than refuses: the newest request is worth more
+        # than the ticket closest to expiring anyway, and refusing it is what let whoever
+        # arrived first lock the door behind them.
+        if :ets.info(@table, :size) >= @max_outstanding, do: evict_oldest()
+
+        ticket = @bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
+        :ets.insert(@table, {ticket, now() + @ttl_ms, address})
+        {:ok, ticket}
     end
   end
+
+  defp count_for(address) do
+    :ets.select_count(@table, [{{:_, :_, :"$1"}, [{:==, :"$1", {:const, address}}], [true]}])
+  end
+
+  defp evict_oldest do
+    case :ets.foldl(fn {t, exp, _a}, acc -> min_by_expiry(acc, {t, exp}) end, nil, @table) do
+      {ticket, _expires} -> :ets.delete(@table, ticket)
+      nil -> :ok
+    end
+  end
+
+  defp min_by_expiry(nil, candidate), do: candidate
+
+  defp min_by_expiry({_t, best} = acc, {_ct, exp} = candidate),
+    do: if(exp < best, do: candidate, else: acc)
 
   @doc """
   Spends a ticket. Succeeds at most once per ticket, and only from the address it was

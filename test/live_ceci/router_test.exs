@@ -11,11 +11,20 @@ defmodule LiveCeci.RouterTest do
   # go in directly: Plug.Conn.put_req_header/3 refuses it, but the validation reads the header.
   # A real ticket by default: the Origin tests are about Origin, and a missing ticket
   # would make them pass for the wrong reason.
+  #
+  # Each call uses a UNIQUE client address. Tickets are address-bound and capped per
+  # address, and a test that expects 403 from the Origin check never reaches the ticket —
+  # `and` short-circuits — so it mints one and leaves it outstanding for its full TTL.
+  # Sharing 127.0.0.1 across every test in this file exhausted that cap and made
+  # unrelated assertions fail on some seeds. Unique addresses also model reality better:
+  # these are supposed to be different clients.
   defp ws_conn(origin \\ "http://localhost:8000", ticket \\ :valid) do
+    address = {127, 0, :rand.uniform(250), :rand.uniform(250)}
+
     query =
       case ticket do
         :valid ->
-          {:ok, t} = LiveCeci.Tickets.issue({127, 0, 0, 1})
+          {:ok, t} = LiveCeci.Tickets.issue(address)
           "?ticket=#{t}"
 
         :none ->
@@ -33,7 +42,20 @@ defmodule LiveCeci.RouterTest do
       |> put_req_header("sec-websocket-version", "13")
 
     conn = if origin, do: put_req_header(conn, "origin", origin), else: conn
-    %{conn | req_headers: [{"host", "localhost"} | conn.req_headers]}
+    %{conn | req_headers: [{"host", "localhost"} | conn.req_headers], remote_ip: address}
+  end
+
+  # ws_conn/2 with an explicit ticket AND the address it was minted for.
+  defp ticket_conn(ticket, address) do
+    conn =
+      conn(:get, "/ws?ticket=#{ticket}")
+      |> put_req_header("connection", "upgrade")
+      |> put_req_header("upgrade", "websocket")
+      |> put_req_header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+      |> put_req_header("sec-websocket-version", "13")
+      |> put_req_header("origin", "http://localhost:8000")
+
+    %{conn | req_headers: [{"host", "localhost"} | conn.req_headers], remote_ip: address}
   end
 
   describe "the ticket on /ws" do
@@ -52,10 +74,14 @@ defmodule LiveCeci.RouterTest do
     test "a ticket works exactly once" do
       # The property that makes a leaked query string survivable. :ets.take/2 is what
       # makes it atomic, so two connections racing on one ticket cannot both win.
-      {:ok, ticket} = LiveCeci.Tickets.issue({127, 0, 0, 1})
+      #
+      # Uses the default :valid path twice with the SAME ticket string, which means the
+      # address has to match too — hence the explicit conn rather than ws_conn/2.
+      address = {127, 0, 9, 9}
+      {:ok, ticket} = LiveCeci.Tickets.issue(address)
 
-      refute call(ws_conn("http://localhost:8000", ticket)).status == 403
-      assert call(ws_conn("http://localhost:8000", ticket)).status == 403
+      refute call(ticket_conn(ticket, address)).status == 403
+      assert call(ticket_conn(ticket, address)).status == 403
     end
 
     test "a ticket minted for another address is refused" do
@@ -63,7 +89,7 @@ defmodule LiveCeci.RouterTest do
       # is exactly when nobody remembers to add it.
       {:ok, ticket} = LiveCeci.Tickets.issue({10, 0, 0, 7})
 
-      assert call(ws_conn("http://localhost:8000", ticket)).status == 403
+      assert call(ticket_conn(ticket, {127, 0, 5, 5})).status == 403
     end
 
     test "the mint endpoint is behind the same Origin check as the upgrade" do

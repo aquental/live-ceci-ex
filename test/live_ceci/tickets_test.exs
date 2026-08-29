@@ -80,16 +80,26 @@ defmodule LiveCeci.TicketsTest do
       end
     end
 
-    test "the table cannot grow without end" do
-      # An unauthenticated endpoint mints these. The bound is not a rate limit — it is
-      # what stops the table being the vulnerability.
-      before = Tickets.outstanding()
+    test "one address cannot fill the table and lock everyone else out" do
+      # THE regression test for this module. The first version enforced only a global
+      # bound and refused the NEWEST request, so 200 mints from one address locked out
+      # every other user — reproduced, not theorised. Per-address is what fixes it.
+      flood = for _ <- 1..400, do: Tickets.issue({203, 0, 113, 9})
 
-      results = for _ <- 1..400, do: Tickets.issue(@local)
+      assert Enum.any?(flood, &match?({:error, :too_many}, &1)),
+             "the flooding address was never refused"
 
-      assert Enum.any?(results, &match?({:error, :too_many}, &1))
+      assert {:ok, _} = Tickets.issue(@local),
+             "a legitimate user was locked out by another address's flood"
+    end
+
+    test "the global bound evicts the oldest rather than refusing the newest" do
+      # The backstop, and the direction matters: refusing the newcomer is what let
+      # whoever arrived first keep the door shut.
+      for i <- 1..250, do: Tickets.issue({10, 0, div(i, 256), rem(i, 256)})
+
       assert Tickets.outstanding() <= 200
-      assert Tickets.outstanding() >= before
+      assert {:ok, _} = Tickets.issue({192, 168, 1, 1})
     end
   end
 
@@ -97,7 +107,15 @@ defmodule LiveCeci.TicketsTest do
     test "it is long, random, and URL-safe" do
       # It travels in a query string, so anything needing escaping is a bug waiting for
       # a client that forgets to escape it.
-      tickets = for _ <- 1..100, do: elem(Tickets.issue(@local), 1)
+      #
+      # One address per ticket: @max_per_address caps how many one address may hold, and
+      # that cap is the fix for the lockout — so this asks a hundred different addresses
+      # rather than raising the limit to make a test pass.
+      tickets =
+        for i <- 1..100 do
+          {:ok, t} = Tickets.issue({10, 0, div(i, 256), rem(i, 256)})
+          t
+        end
 
       assert length(Enum.uniq(tickets)) == 100
 
