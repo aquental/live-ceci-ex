@@ -115,7 +115,8 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written — including whether manual turn detection beats server VAD |
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `priv/spike/load_test.exs` | 50 concurrent sessions against a stub provider — see [Load](#load) |
-| `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
+| `lib/live_ceci/tools.ex` | seven calls that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt. `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` are still stubs; `listar_pacientes` / `listar_sessoes_hoje` / `resumo_mensal` read the snapshot, and `fechar_mes` writes to it by compare-and-swap |
+| `lib/live_ceci/data.ex` · `lib/live_ceci/clinic.ex` · `lib/live_ceci/clock.ex` · `priv/data/clinic.json` | the in-memory clinic snapshot, the pure queries over it, and the overridable clock. `get_data/0` is one ETS lookup **in the caller**, the same shape as `LiveCeci.Tickets`, because `dispatch/2` runs with the model's voice paused |
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_ceci/limits.ex` | every ceiling in one place, because three of them constrain each other — the global ticket bound is *derived* here, never configured |
 | `lib/live_ceci/sessions.ex` | the cap on concurrent sessions — a GenServer, because deciding correctly under contention means deciding one at a time |
@@ -242,6 +243,24 @@ Adding `limits_test.exs` made a latent flake reproducible. Five test files moved
 - `previous = Application.get_env(...)` then writing `previous` back — which saved `nil` once a sibling had deleted the key, and then *wrote `nil`*. `get_env/3`'s default applies to an absent key, not to one set to `nil`, so `Limits.sessions_total/0` answered `nil` and the suite failed on one seed and passed on the next.
 
 `LiveCeci.EnvSandbox` is the only way tests move config now, and it uses `fetch_env/2` — the one of the three that can tell *absent* from *present and nil*. Fifteen seeds green afterwards.
+
+### And the round after that, on the clinic snapshot — 2026-08-29
+
+`LiveCeci.Data`, `LiveCeci.Clinic` and `LiveCeci.Clock` landed after the audit above, so they got their own. Five defects, each reproduced first.
+
+**`fechar_mes` lost writes.** It was `get_data` → decide → `put_data`, which is last-writer-wins across two separate ETS operations. Reproduced: session A closes agosto, session B closes setembro from a snapshot read a moment earlier, and B's write reverts agosto — with both people told *"mês fechado, dados encaminhados ao contador"*. `Data.replace/2` is a compare-and-swap now, one `:ets.select_replace/2` with the old snapshot in a `==` guard: atomic, still in the caller, 2.2 µs. The retry **re-reads before deciding again**, which also closes the same-month version of the race for free — the second attempt sees the first one's close and says so.
+
+**Two spellings of one month told two stories.** With a registry saying agosto is 2025 and sessions dated 2026-08, `"agosto"` answered a confident `sessoes: 0` and `"2026-08"` answered `nil`. `resolve_month/3` derives one `{year, month}` first and then finds the registry entry for it, so every spelling agrees or is `nil` together.
+
+**The schema advertised a value the code refused.** The parameter description is literally `"o mês pedido, ex.: 'agosto' ou 'este mês'"`, and `"este mês"` answered *"mês desconhecido"* — in both tools. The existing test asserted that `nil` as expected, which is how a description and its behaviour stay disagreed for a whole release. Relative months resolve against a date the caller passes, so `LiveCeci.Clinic` keeps having no clock.
+
+**`get_data/0` guarded the wrong emptiness.** Its `[] -> @empty` clause covers an empty table; the table is owned by the `Data` process and dies with it, so the failure that happens is a **missing** one. Reproduced: `:ets.lookup/2` raises `ArgumentError`, and `dispatch/2` runs inside the provider's session process — so a read took a live voice call down.
+
+**The instant-return guard was not guarding.** One 320-reduction ceiling for seven tools whose legitimate costs run from 50 to 295. A `File.read!` of the fixture costs 39 here, so it fit under the ceiling for **every** tool. There is a ceiling per tool now, measured plus 25 — a margin smaller than the thing it exists to catch — and beside it a call trace that fails outright if `dispatch/2` touches `File`, `Jason`, `:gen_server` or a socket, which is the property the reductions were only ever a proxy for. The trace has its own test, because a tracer that silently catches nothing makes every assertion under it pass forever; the first version of it did exactly that, and a process turns out not to receive its own `:call` trace messages.
+
+Two more, smaller: the demo fixture resolved `"date": "today"` once at boot, so past midnight Ceci said *"nenhuma sessão hoje"* with four appointments in the snapshot — the exact words of a genuinely empty day. A ten-minute rollover now moves the rows the snapshot already has, which keeps a month closed by voice closed across the boundary. And the fixture shipped `"João"` and `"Ana"` while the product's own boundary is initials, on the one path that leaves the machine.
+
+Two things were **not** changed, because they are product decisions rather than defects, and they are listed under [Open questions](#open-questions).
 
 ## Measuring latency
 
@@ -412,7 +431,7 @@ mix format --check-formatted
 mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-**235 tests, no network. 88.0% line coverage, lowest module 75.4%:**
+**271 tests, no network. 89.0% line coverage, lowest module 75.4%:**
 
 | | |
 |---|---|
@@ -420,7 +439,7 @@ mix deps.audit          # advisory database; mix hex.audit only reads retirement
 | `provider/gemini_test.exs` (36) | real `gemini_ex` structs in, neutral events out, the session options the API actually reads, the `connect` failure that used to leave a billed session behind — and every callback `session_opts/1` wires **invoked**, because "the closure is present" is a weaker claim than it looks |
 | `router_test.exs` (35) | the whole HTTP surface: the `Origin` check against real hostile origins including a userinfo-smuggled one, tickets that work exactly once and only from the address they were minted for, the capacity refusal that does **not** spend the ticket, eight `X-Forwarded-For` cases including an IPv4-mapped peer, that the ticket is checked before the capacity singleton, the CSP that no longer names a bare scheme, and that nothing under `/assets` is reachable |
 | `socket_test.exs` (23) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, the one text frame the browser sends, the two bounds that end a session, and that 200 commit frames in a loop buy exactly one upstream turn |
-| `tools_test.exs` (19) | dispatch, the four declarations, the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work — that no tool declares a parameter clinical content could hide in, and that cost does not grow with what the model sends |
+| `tools_test.exs` (31) | dispatch, the seven declarations, and the instant-return guardrail — now measured three ways: wall clock for blocking, a **per-tool** reduction ceiling for work, and a call trace that fails if dispatch touches `File`, `Jason`, `:gen_server` or a socket. Plus that no tool declares a parameter clinical content could hide in, that cost does not grow with what the model sends, and that two sessions closing two different months cannot clobber each other |
 | `tickets_test.exs` (19) | single use under eight-way contention, address binding, expiry against a negative monotonic clock, that one address cannot lock everyone else out, that a wrong address does not **destroy** someone else's ticket, that eviction leaves three busy addresses within two tickets of each other, that a tie is broken on age rather than map order, and that the router's peek does not spend |
 | `live_ceci_test.exs` (14) | `config/0` reads at call time, `pt_BR` normalises to `pt-BR`, `env_int/3` falls back **loudly** on every plausible `.env` typo, and the test environment is sealed from both `.env` and the shell |
 | `redact_test.exs` (11) | the shapes that actually leaked a key into a log, including one hidden inside an unprintable binary, the two passes that catch them, what redaction must **not** eat — and that no `Logger` call in `lib/` inspects anything itself |
@@ -429,10 +448,20 @@ mix deps.audit          # advisory database; mix hex.audit only reads retirement
 | `provider/gemini/carrier_test.exs` (6) | the carrier never blocks its caller, its queue is bounded, and a test that reads the installed `gemini_ex` to check the internal message it depends on is still there |
 | `agent_name_test.exs` (5) | the agent is Ceci, in the instruction, in the `:ceci` atom, in the `"ceci"` role on the wire, and nowhere in `lib/` or `priv/frontend` under the old name |
 | `persona_test.exs` (5) | the instruction loads, carries who she is / what she will not touch / that she is live, and names every callable tool |
+| `clinic_test.exs` (12) | the month arithmetic: both spellings of one month give one answer, a relative month resolves against the date it is given, the ISO path reaches the same errors the name path does, and a ragged row out of a hand-edited JSON file is skipped rather than fatal |
+| `data_test.exs` (11) | the snapshot is an ETS lookup and not a `GenServer.call` — asserted with the server suspended — that a **missing** table answers empty instead of raising into a live voice call, and that `replace/2` refuses a stale caller and compares exactly rather than as a subset |
 | `limits_test.exs` (4) | the global ticket bound is derived at 2× whatever the per-address cap is, there is **no configuration key that could set it independently**, every ceiling answers without configuration, and the byte budget is looser than the clock for ordinary speech — otherwise the clock would never be the thing that fired |
 | `application_test.exs` (3) | one listener, bound to loopback, with everything it depends on started before it — and a killed child coming back |
 
 Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a dummy API key so config validation passes without one.
+
+## Open questions
+
+Two findings from the clinic audit are real and deliberately unapplied, because both trade away something the product was designed to have.
+
+**The patient roster now leaves the machine.** `listar_pacientes` and `listar_sessoes_hoje` hand their results to the live-voice provider, because Ceci has to *say* them — that is the feature. Before these tools existed, every tool was a stub and no real data was ever sent. The mitigation the audit proposed is already in the architecture: the `action` half of the dispatch tuple is browser-only, so names could go to the screen and a count to the model. That would keep the roster local and make Ceci unable to read it aloud. It is a real choice between the feature and the exposure, and it is not one to make in a refactor.
+
+**`fechar_mes` is gated by the prompt, not by code.** `LiveCeci.Persona` tells Ceci to run the preview, ask, and only then close; the tool description repeats it. That is a guarantee the model makes, for the one tool that changes state. The argument against it is sharp — ambient speech in a therapy room is an input channel, and there are no user accounts to tell one voice from another. The fix that keeps the voice-first flow is a browser confirmation frame: `fechar_mes` returns a *request*, and the commit travels back over the text frame `LiveCeci.Socket` already handles. That is a protocol change and a click, on a feature built to avoid clicks.
 
 ## Notes
 
