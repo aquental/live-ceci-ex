@@ -47,6 +47,22 @@ defmodule LiveCeci.Sessions do
   @spec join(:inet.ip_address()) :: :ok | {:error, :too_many_sessions}
   def join(address), do: GenServer.call(__MODULE__, {:join, address})
 
+  @doc """
+  Whether a slot looks free, without claiming one.
+
+  Advisory on purpose. The router asks this so it can refuse at capacity with a plain
+  503, before the upgrade and before the ticket is spent — the alternative the audit
+  suggested, claiming the slot in the router, would either burn the ticket on a refusal
+  or hold a slot for a process that never became a session.
+
+  Being advisory means it can be wrong: someone can take the last slot between this
+  answer and `join/1`. That is fine, because `join/1` in `LiveCeci.Socket.init/1`
+  remains the authoritative check and still refuses with 1013. This only turns the
+  common case into a better-behaved one.
+  """
+  @spec available?(:inet.ip_address()) :: boolean()
+  def available?(address), do: GenServer.call(__MODULE__, {:available?, address})
+
   @doc "How many sessions are live right now."
   @spec total() :: non_neg_integer()
   def total, do: GenServer.call(__MODULE__, :total)
@@ -79,6 +95,11 @@ defmodule LiveCeci.Sessions do
         Process.monitor(pid)
         {:reply, :ok, Map.put(holders, pid, address)}
     end
+  end
+
+  def handle_call({:available?, address}, _from, holders) do
+    free = map_size(holders) < max_total() and count_for(holders, address) < max_per_address()
+    {:reply, free, holders}
   end
 
   def handle_call(:total, _from, holders), do: {:reply, map_size(holders), holders}

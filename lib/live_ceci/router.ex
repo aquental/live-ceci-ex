@@ -18,6 +18,8 @@ defmodule LiveCeci.Router do
 
   require Logger
 
+  alias LiveCeci.Redact
+
   # Cheap, and none of it depends on the app being hardened. The page loads no third-party
   # anything — its own stylesheet is inline, its scripts are two same-origin files, and
   # the only network it opens is a WebSocket back here — so a policy this tight costs
@@ -106,7 +108,7 @@ defmodule LiveCeci.Router do
 
       _rejected ->
         Logger.warning(
-          "rejected /ws-ticket from origin #{inspect(get_req_header(conn, "origin"))}"
+          "rejected /ws-ticket from origin #{Redact.inspect(get_req_header(conn, "origin"))}"
         )
 
         conn |> send_resp(403, "forbidden") |> halt()
@@ -118,16 +120,30 @@ defmodule LiveCeci.Router do
 
     case get_req_header(conn, "origin") do
       [origin] ->
-        if origin_allowed?(origin) and ticket_ok?(conn) do
-          conn
-          |> WebSockAdapter.upgrade(LiveCeci.Socket, [address: conn.remote_ip],
-            timeout: 60_000,
-            max_frame_size: 1_000_000
-          )
-          |> halt()
-        else
-          Logger.warning("rejected /ws upgrade from origin #{inspect(origin)}")
-          conn |> send_resp(403, "forbidden") |> halt()
+        cond do
+          not origin_allowed?(origin) ->
+            Logger.warning("rejected /ws upgrade from origin #{Redact.inspect(origin)}")
+            conn |> send_resp(403, "forbidden") |> halt()
+
+          # Asked BEFORE the ticket is spent. At capacity this is a plain 503 with the
+          # ticket still valid, instead of consuming it and then answering a completed
+          # handshake with a 1013 close. Advisory only — LiveCeci.Socket.init/1 still
+          # makes the authoritative claim, and still refuses if this raced.
+          not LiveCeci.Sessions.available?(conn.remote_ip) ->
+            Logger.warning("refusing /ws upgrade at capacity")
+            conn |> send_resp(503, "muitas conexões — tente daqui a pouco") |> halt()
+
+          not ticket_ok?(conn) ->
+            Logger.warning("rejected /ws upgrade: bad or missing ticket")
+            conn |> send_resp(403, "forbidden") |> halt()
+
+          true ->
+            conn
+            |> WebSockAdapter.upgrade(LiveCeci.Socket, [address: conn.remote_ip],
+              timeout: 60_000,
+              max_frame_size: 1_000_000
+            )
+            |> halt()
         end
 
       _missing ->
