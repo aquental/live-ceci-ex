@@ -5,18 +5,30 @@ defmodule LiveCeci.MixProject do
     [
       app: :live_ceci,
       version: "0.1.0",
-      elixir: "~> 1.17",
+      # Matches .tool-versions, which is what CI builds with. It was "~> 1.17": an honest
+      # floor when it was written, and by now a stale one that lets a contributor on an
+      # older toolchain pass the check locally while CI builds strictly on 1.20.4.
+      elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      elixirc_paths: elixirc_paths(Mix.env())
     ]
   end
 
   def application do
     [
-      extra_applications: [:logger],
+      # :crypto is used directly by LiveCeci.Tickets for strong_rand_bytes/1. It worked
+      # without being declared only because something else in the tree starts it — an
+      # implicit invariant, in a project that has already had a dependency swap its
+      # transport once.
+      extra_applications: [:logger, :crypto],
       mod: {LiveCeci.Application, []}
     ]
   end
+
+  # test/support holds helpers shared across test files, compiled only for :test.
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
 
   defp deps do
     [
@@ -32,7 +44,7 @@ defmodule LiveCeci.MixProject do
       # Used directly — LiveCeci.Socket declares `@behaviour WebSock` — but it used to
       # arrive only through websock_adapter. A behaviour you implement is a dependency
       # you have; leaving it transitive means a resolver is free to move it under you.
-      {:websock, "~> 0.5"},
+      {:websock, "~> 0.5.3"},
 
       # Gemini Live API — Gemini.Live.Session is a GenServer over the Bidi WebSocket.
       # Pinned to the minor: "~> 0.17" would allow anything under 1.0, and 0.16.0 already

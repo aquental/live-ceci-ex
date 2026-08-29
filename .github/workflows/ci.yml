@@ -2,14 +2,18 @@
 # That matters more here than in most projects: gemini_ex is pinned to the minor because
 # LiveCeci.LiveSession calls one of its INTERNAL GenServer messages and the providers
 # pattern-match its structs, so a patch release can break this app at runtime with a
-# clean compile. The test suite is the only thing that would notice, and until now it
-# only ran when somebody remembered to type it.
+# clean compile. The test suite is the only thing that would notice.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+
+# Nothing here writes anything. Declared rather than inherited, because the default for
+# a repository can be write and a workflow should not quietly hold more than it uses.
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -18,7 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: erlef/setup-beam@v1
+      # Pinned to a release rather than the floating @v1: this action decides which
+      # compiler builds the code, so "whatever v1 means today" is a strange thing to
+      # leave open in the one place that also enforces version-type: strict.
+      - uses: erlef/setup-beam@v1.18.2
         with:
           version-file: .tool-versions
           version-type: strict
@@ -28,13 +35,17 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          # .tool-versions is in the key because _build is compiler-specific. Mix's own
+          # manifest check would force a recompile on a version change anyway, so this is
+          # belt and braces — but a cache that survives a toolchain bump is a cache that
+          # can only mislead.
+          key: ${{ runner.os }}-mix-${{ hashFiles('.tool-versions', 'mix.lock') }}
           restore-keys: ${{ runner.os }}-mix-
 
       - run: mix deps.get
 
-      # No .env on a runner, which is the point: config/runtime.exs now refuses to read
-      # one in :test anyway, so a green run here proves the suite does not depend on a
+      # No .env on a runner, which is the point: config/runtime.exs refuses to read one
+      # in :test anyway, so a green run here proves the suite does not depend on a
       # developer's machine.
       - run: mix compile --warnings-as-errors
 
@@ -42,5 +53,21 @@ jobs:
 
       - run: mix test
 
-      # Advisory database, not just the retirement flags mix hex.audit reads.
+      # Two audits, not one. deps.audit reads the advisory database; hex.audit reads
+      # maintainer retirement flags. They answer different questions and an earlier
+      # comment justifying only the first was really an argument for running both.
+      - run: mix hex.audit
+
       - run: mix deps.audit
+
+      # The compile-time graph is 13 modules with no cycles today. Catching the first one
+      # on the commit that introduces it is far cheaper than finding it later, and this
+      # exits non-zero only if a cycle exists.
+      - name: no compile-time cycles
+        run: |
+          cycles=$(mix xref graph --format cycles --label compile)
+          echo "$cycles"
+          case "$cycles" in
+            *"No cycles found"*) exit 0 ;;
+            *) exit 1 ;;
+          esac
