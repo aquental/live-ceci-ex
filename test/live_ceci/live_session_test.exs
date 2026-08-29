@@ -12,8 +12,9 @@ defmodule LiveCeci.LiveSessionTest do
     def init(mode), do: {:ok, mode}
 
     @impl true
-    def handle_call({:send_realtime_input, opts}, _from, :ok = state) do
-      {:reply, {:ok, opts}, state}
+    def handle_call({:send_realtime_input, opts}, _from, {:echo, owner} = state) do
+      send(owner, {:sent, opts})
+      {:reply, :ok, state}
     end
 
     def handle_call({:send_realtime_input, _opts}, _from, :never_replies = state) do
@@ -22,33 +23,68 @@ defmodule LiveCeci.LiveSessionTest do
     end
   end
 
-  describe "send_audio/3" do
-    test "sends the mic chunk as a realtime input blob" do
-      {:ok, session} = StubSession.start_link(:ok)
+  describe "send_audio/2" do
+    test "the mic chunk reaches the session as a realtime input blob" do
+      {:ok, session} = StubSession.start_link({:echo, self()})
+      {:ok, carrier} = LiveSession.start_link(session)
 
-      assert {:ok, [audio: blob]} = LiveSession.send_audio(session, <<1, 2, 3, 4>>)
+      assert :ok = LiveSession.send_audio(carrier, <<1, 2, 3, 4>>)
+
+      assert_receive {:sent, [audio: blob]}, 1_000
       assert %{data: <<1, 2, 3, 4>>, mime_type: "audio/pcm;rate=16000"} = blob
     end
 
-    test "a stalled session returns an error instead of exiting the caller" do
+    test "a stalled session never blocks the caller" do
+      # THE reason this module became a process. It used to make the blocking call on the
+      # socket process — measured at 1001 ms for a single frame against a wedged session,
+      # on the process that also has to push her voice to the browser. Ten frames a
+      # second went through that.
       {:ok, session} = StubSession.start_link(:never_replies)
+      {:ok, carrier} = LiveSession.start_link(session)
 
-      # The whole point: trap_exit does NOT catch an exit raised in this process, so
-      # without the catch this line would kill the socket — and the browser call with it.
-      assert {:error, {:exit, {:timeout, _}}} = LiveSession.send_audio(session, <<0, 0>>, 20)
+      {elapsed, :ok} = :timer.tc(fn -> LiveSession.send_audio(carrier, <<0, 0>>) end)
+
+      assert elapsed < 50_000,
+             "send_audio took #{elapsed}µs — the socket process must never wait on the network"
+
       assert Process.alive?(self())
     end
 
-    test "a dead session returns an error instead of exiting the caller" do
-      {:ok, session} = StubSession.start_link(:ok)
-      # unlink first, or killing the stub takes this test process down with it
+    test "a dead session is not an error the caller has to handle" do
+      {:ok, session} = StubSession.start_link({:echo, self()})
+      {:ok, carrier} = LiveSession.start_link(session)
       Process.unlink(session)
       ref = Process.monitor(session)
       Process.exit(session, :kill)
       assert_receive {:DOWN, ^ref, :process, ^session, :killed}
 
-      assert {:error, {:exit, {:noproc, _}}} = LiveSession.send_audio(session, <<0, 0>>, 20)
+      assert :ok = LiveSession.send_audio(carrier, <<0, 0>>)
       assert Process.alive?(self())
+    end
+
+    test "the queue is bounded, so a slow upstream cannot grow it without end" do
+      # The failure the first version of the Grok fix shipped: casting instead of calling
+      # does not remove the queue, it moves it. Measured there before this bound existed:
+      # 5_000 frames at a process that was not draining produced a 5_000-message, 1 MB
+      # mailbox and :ok every single time.
+      {:ok, session} = StubSession.start_link(:never_replies)
+      {:ok, carrier} = LiveSession.start_link(session)
+
+      for _ <- 1..2_000, do: LiveSession.send_audio(carrier, <<0, 0>>)
+
+      assert eventually(fn ->
+               {:message_queue_len, queued} = Process.info(carrier, :message_queue_len)
+               queued <= 40
+             end),
+             "the carrier mailbox grew past the bound"
+    end
+  end
+
+  defp eventually(check, remaining \\ 1_000) do
+    cond do
+      check.() -> true
+      remaining <= 0 -> false
+      true -> Process.sleep(10) && eventually(check, remaining - 10)
     end
   end
 

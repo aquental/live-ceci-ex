@@ -27,14 +27,17 @@ defmodule LiveCeci.Provider.Gemini do
   @impl LiveCeci.Provider
   def open(opts) do
     case Session.start_link(session_opts(opts)) do
-      {:ok, session} -> connect_or_close(session)
-      {:error, reason} -> {:error, reason}
+      {:ok, session} ->
+        connect_or_close(session)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   # The `with` that used to be here dropped `session` when connect/1 failed. Reproduced
-  # with an invalid key: open/1 returned {:error, {:setup_failed, ...}} and left a live
-  # Gemini.Live.Session process behind.
+  # with an invalid key: open/1 returned {:error, {:setup_failed, ...}} and left one live
+  # Gemini.Live.Session process behind, holding an upstream session that is billed.
   #
   # Worse than the same bug was in Grok, where it was fixed first: the LiveCeci.Sessions
   # slot is keyed to the SOCKET pid, so a session leaked this way is invisible to the cap
@@ -42,7 +45,16 @@ defmodule LiveCeci.Provider.Gemini do
   defp connect_or_close(session) do
     case Session.connect(session) do
       :ok ->
-        {:ok, session}
+        # The socket must not block on the network, so the blocking call moves to a
+        # process of its own. See LiveCeci.LiveSession.
+        case LiveCeci.LiveSession.start_link(session) do
+          {:ok, carrier} ->
+            {:ok, %{session: session, carrier: carrier}}
+
+          {:error, reason} ->
+            close_session(session)
+            {:error, reason}
+        end
 
       {:error, reason} ->
         close_session(session)
@@ -110,7 +122,7 @@ defmodule LiveCeci.Provider.Gemini do
   end
 
   @impl LiveCeci.Provider
-  def send_audio(session, pcm), do: LiveCeci.LiveSession.send_audio(session, pcm)
+  def send_audio(%{carrier: carrier}, pcm), do: LiveCeci.LiveSession.send_audio(carrier, pcm)
 
   @impl LiveCeci.Provider
   def commit_turn(_session) do
@@ -130,6 +142,8 @@ defmodule LiveCeci.Provider.Gemini do
     # trap_exit does nothing for that — so a wedged session could take down the very
     # callback that exists to clean it up, and hold the connection process for five
     # seconds on the way. Same guard, same reason, as LiveCeci.LiveSession.
+    %{session: session} = session
+
     if is_pid(session) and Process.alive?(session) do
       Task.await(Task.async(fn -> Session.close(session) end), @close_timeout)
     end

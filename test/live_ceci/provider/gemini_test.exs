@@ -196,7 +196,7 @@ defmodule LiveCeci.Provider.GeminiTest do
       assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 1_000
 
       refute Process.alive?(pid)
-      assert :ok = Subject.close(pid)
+      assert :ok = Subject.close(%{session: pid, carrier: self()})
     end
   end
 

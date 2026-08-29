@@ -79,6 +79,10 @@ defmodule LiveCeci.Provider.Grok do
     end
   end
 
+  # Roughly two seconds of microphone at ten frames a second. The same bound, and the
+  # same reasoning, as LiveCeci.LiveSession carries for Gemini.
+  @max_queued 20
+
   @impl LiveCeci.Provider
   def send_audio(ws, pcm) do
     # Straight out as a binary frame — no envelope, no base64. The session negotiated
@@ -91,13 +95,32 @@ defmodule LiveCeci.Provider.Grok do
     # browser waited behind it. Casting hands the frame to the WebSockex process and
     # returns immediately; that process is where the waiting belongs.
     #
-    # What this gives up is per-frame backpressure and a per-frame error. Neither was
-    # worth much: send_audio's only caller already logs and drops on error, and a dropped
-    # mic frame is survivable by design. A dead session still surfaces through
-    # handle_disconnect/2 as {:closed, reason}.
-    WebSockex.cast(ws, {:send_audio, pcm})
+    # What this gives up is per-frame backpressure, and the first version of this fix
+    # gave it up for NOTHING — which the security re-audit caught. WebSockex.cast/2 never
+    # blocks, Bandit reads at loopback speed and this socket drains at WAN speed, so the
+    # queue did not disappear, it moved: 5_000 frames cast at a process that was not
+    # draining produced a 5_000-message, 1 MB mailbox and :ok every single time.
+    #
+    # Blocking and not-blocking were never the only two options. The queue is bounded
+    # here instead, and a frame that would overflow it is dropped — live audio that
+    # arrives late is worth nothing, and the stream recovers on its own.
+    if backed_up?(ws) do
+      {:error, :behind}
+    else
+      WebSockex.cast(ws, {:send_audio, pcm})
+    end
   catch
     :exit, reason -> {:error, {:exit, reason}}
+  end
+
+  # Reading another process's queue length is cheap and, unlike a call, does not wait on
+  # it. It returns nil for a dead process, which the `case` treats as "not backed up" so
+  # the send proceeds and fails through the normal path.
+  defp backed_up?(ws) do
+    case Process.info(ws, :message_queue_len) do
+      {:message_queue_len, queued} -> queued > @max_queued
+      nil -> false
+    end
   end
 
   @impl LiveCeci.Provider
