@@ -36,14 +36,16 @@ Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"*
 | `GROK_LIVE_MODEL` | `grok-voice-latest` | the xAI voice model |
 | `GROK_LIVE_VOICE` | `eve` | Ceci's xAI voice |
 | `PORT` | `8000` | the HTTP port |
+| `BIND_IP` | `127.0.0.1` | which address the listener binds. Bandit's own default is `0.0.0.0`, which puts an unauthenticated WebSocket in front of a metered API on the open LAN. Opening this is the deliberate opt-in |
 | `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
 | `MAX_SESSIONS` | `8` | how many live sessions may exist at once. Each holds an upstream session that is billed while it lives, and eight tabs is eight of them |
 | `MAX_SESSIONS_PER_ADDRESS` | `4` | the same, per client address. Bound to loopback the two coincide; they stop coinciding the moment `BIND_IP` opens |
+| `MAX_TICKETS_PER_ADDRESS` | `20` | how many upgrade tickets one address may hold at once. On loopback that is one person; **behind a NAT or a reverse proxy it is everyone**, and then this — not `MAX_SESSIONS` — is what caps concurrent users. A load test found this the hard way: 50 clients, `MAX_SESSIONS=100`, and 28 refusals, all at the ticket desk |
 | `ALLOWED_ORIGINS` | — | extra origins allowed to open `/ws`, comma separated, exact `scheme://host:port`. Loopback is always allowed on any port and needs no listing |
 | `TURN_DETECTION` | `manual` | `manual` or `server` — who decides your turn ended. `manual` measured 833 ms faster on xAI and trades that against false turns. Gemini ignores it |
 | `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
 
-The last two are latency knobs, and `priv/spike/latency_bench.exs` measures what moving them buys. Both fall back **loudly**: `SILENCE_DURATION_MS=30O` (letter O) warns at boot rather than silently reverting to the default and invalidating the next benchmark run.
+`SILENCE_DURATION_MS`, `FRAME_SAMPLES` and `TURN_DETECTION` are the latency knobs, and `priv/spike/latency_bench.exs` measures what moving them buys. Both fall back **loudly**: `SILENCE_DURATION_MS=30O` (letter O) warns at boot rather than silently reverting to the default and invalidating the next benchmark run.
 
 `LiveCeci.config/0` reads the resolved values back out, at call time — so what `runtime.exs` writes at boot is what the session opens with.
 
@@ -101,21 +103,23 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | | |
 |---|---|
 | `lib/live_ceci.ex` | `config/0` — the resolved model, voice, and port |
-| `lib/live_ceci/application.ex` | starts Bandit on `PORT`, and nothing else |
+| `lib/live_ceci/application.ex` | starts the ticket store, the session cap, and Bandit — in that order, because an upgrade arriving before the first two would crash on them |
 | `lib/live_ceci/socket.ex` | the bridge — provider-agnostic, six events wide |
 | `lib/live_ceci/provider.ex` | the behaviour, and why it has no `send_tool_result/3` |
 | `lib/live_ceci/provider/gemini.ex` | Gemini Live, through `gemini_ex` |
 | `lib/live_ceci/provider/grok.ex` | xAI's Voice Agent, hand-rolled on `websockex` — no Elixir package speaks the OpenAI Realtime protocol |
-| `lib/live_ceci/live_session.ex` | the one upstream Gemini call, with its own timeout and `catch :exit` — a stalled session must not take the listener down |
+| `lib/live_ceci/live_session.ex` | the process that carries mic audio to Gemini **so the socket does not** — `gemini_ex` has no cast path, so the blocking call had to move rather than disappear, and the queue is bounded |
 | `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written — including whether manual turn detection beats server VAD |
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
+| `priv/spike/load_test.exs` | 50 concurrent sessions against a stub provider — see [Load](#load) |
 | `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_ceci/sessions.ex` | the cap on concurrent sessions — a GenServer, because deciding correctly under contention means deciding one at a time |
 | `lib/live_ceci/tickets.ex` | single-use tickets for the upgrade — the browser's `new WebSocket(url)` takes no headers, so the credential cannot ride on the upgrade itself |
 | `lib/live_ceci/redact.ex` | `inspect/1` for anything a provider touched — both APIs echo the key back, one in its URL and one in its error text |
-| `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
-| `config/runtime.exs` | the `.env` reader and the API-key aliasing |
+| `lib/live_ceci/router.ex` | the whole HTTP surface: the upgrade behind an `Origin` check, a capacity check and a ticket; the ticket mint; static files; `/healthz`; `/config.json` |
+| `config/runtime.exs` | the `.env` reader, the API-key aliasing, and every knob above — refuses to read `.env` at all in `:test` |
+| `.tool-versions` · `.github/workflows/ci.yml` | what this is built with, and the gate that checks it — compile, format, test, both audits, and a compile-cycle check |
 | `priv/frontend/` | the browser client: mic worklet, voice playback, transcript, and the activity panel |
 
 Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
@@ -130,7 +134,7 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 | `GET /healthz` | `200 ok` |
 | `GET /config.json` | `{"frameSamples":N,"silenceMs":N}` — the only channel between `.env` and the AudioWorklet that applies them |
 | `POST /ws-ticket` | mints a single-use, 30 s, address-bound ticket. Same `Origin` check as `/ws` — an endpoint that mints what `/ws` demands is worth exactly the check in front of it |
-| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame, **`Origin` checked** (loopback on any port, plus `ALLOWED_ORIGINS`) **and ticket checked**. Anything else, including a missing header or ticket, gets 403 |
+| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame. Three checks in order: **`Origin`** (loopback on any port, plus `ALLOWED_ORIGINS`), then **capacity**, then the **ticket**. A bad or missing origin or ticket is `403`; at capacity it is `503`, and the ticket is deliberately **not** spent — it stays valid for when a slot frees |
 
 ## Measuring latency
 
@@ -235,6 +239,39 @@ and it can be wrong. `idle_timeout_ms` lives inside the `turn_detection` this mo
 off, so there is no server-side net either — the worklet carries a 30 s max-utterance
 guard instead.
 
+## Load
+
+```bash
+LOAD_CLIENTS=50 LOAD_SECONDS=30 mix run --no-start priv/spike/load_test.exs
+```
+
+Real Bandit, real WebSockets, real tickets, real caps, real audio frames at the ten per
+second a browser sends. The provider is the one fake part, deliberately: fifty real
+sessions would cost money and would measure xAI's capacity rather than this server's.
+The stub echoes each mic frame back as voice, so the downstream push and the shedding
+are exercised too.
+
+Fifty sessions, thirty seconds, 500 frames/second in aggregate:
+
+```
+sessions    50/50 connected, 0 refused
+frames up   15000/15000 sent
+frames down 15000/15000 echoed back
+memory      2.9 MB total, 59.5 KB per session
+processes   2 left over
+```
+
+Nothing dropped either way, no backpressure fired, nothing leaked. At 59.5 KB a session
+a gigabyte holds roughly seventeen thousand of them — this server is not the ceiling.
+
+The run before that one is why `MAX_TICKETS_PER_ADDRESS` exists: 22 of 50 connected with
+`MAX_SESSIONS` at 100, and every refusal was at the per-address ticket cap rather than
+the session cap the run was set up to test. It was a hardcoded 20.
+
+**What it does not measure**, so nobody reads more into it: provider latency, which the
+985/1220 ms above dominates anyway; the providers' own concurrency limits, which remain
+the real and unknown ceiling; and TLS, since all of this is loopback.
+
 ## The WebSocket contract
 
 `WS /ws` — the whole contract.
@@ -255,27 +292,32 @@ mix format --check-formatted
 mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-**126 tests, no network:**
+**185 tests, no network:**
 
 | | |
 |---|---|
-| `provider/grok_test.exs` (33) | xAI events in, neutral events out — binary voice and the base64 fallback, barge-in, transcripts, tool dispatch, the session shape including the configurable silence budget, and that the tool reply goes out by `cast`, because `WebSockex.send_frame/3` **raises** when the caller is the socket process |
-| `provider/gemini_test.exs` (25) | real `gemini_ex` structs in, neutral events out — the assertions that lived in `socket_test.exs` before the seam existed, plus the session options the API actually reads |
-| `socket_test.exs` (14) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, plus a stub provider proving the upstream call goes through whichever one is configured |
-| `tools_test.exs` (16) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work — and that no tool declares a parameter clinical content could hide in |
-| `live_ceci_test.exs` (12) | `config/0` reads at call time so a boot-time override wins, the test VM asks the OS for a port, `pt_BR` normalises to `pt-BR`, and `env_int/3` falls back **loudly** on every plausible `.env` typo |
-| `router_test.exs` (7) | `/healthz`, `/config.json`, the 404 catch-all, the static client — and that nothing under `/assets` is reachable, `ceci_persona.txt` least of all |
+| `provider/grok_test.exs` (41) | xAI events in, neutral events out — binary voice and the base64 fallback, barge-in, transcripts, tool dispatch, the two-message turn commit, the session shape in both turn modes, and that mic frames go out by `cast` so a slow upstream never holds the socket |
+| `provider/gemini_test.exs` (25) | real `gemini_ex` structs in, neutral events out, plus the session options the API actually reads and the `connect` failure that used to leave a billed session behind |
+| `router_test.exs` (21) | the whole HTTP surface: the `Origin` check against real hostile origins, tickets that work exactly once and only from the address they were minted for, the capacity refusal that does **not** spend the ticket, the security headers, and that nothing under `/assets` is reachable |
+| `tools_test.exs` (19) | dispatch, the four declarations, the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work — that no tool declares a parameter clinical content could hide in, and that cost does not grow with what the model sends |
+| `socket_test.exs` (16) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, and the one text frame the browser sends |
+| `live_ceci_test.exs` (14) | `config/0` reads at call time, `pt_BR` normalises to `pt-BR`, `env_int/3` falls back **loudly** on every plausible `.env` typo, and the test environment is sealed from both `.env` and the shell |
+| `redact_test.exs` (9) | the four shapes that actually leaked a key into a log, the two passes that catch them, what redaction must **not** eat — and that no `Logger` call in `lib/` inspects anything itself |
+| `tickets_test.exs` (9) | single use under eight-way contention, address binding, expiry against a negative monotonic clock, and that one address cannot lock everyone else out |
+| `sessions_test.exs` (6) | the cap, per-address, release on a brutal kill with no cleanup running, exactly five accepted out of forty concurrent joins, and the upstream closed when a connection dies badly |
+| `live_session_test.exs` (6) | the carrier never blocks its caller, its queue is bounded, and a test that reads the installed `gemini_ex` to check the internal message it depends on is still there |
 | `socket_lifecycle_test.exs` (6) | the socket opened and closed for real over TCP, so `terminate/2` actually runs — the path that leaked billed provider sessions when it did not |
 | `agent_name_test.exs` (5) | the agent is Ceci, in the instruction, in the `:ceci` atom, in the `"ceci"` role on the wire, and nowhere in `lib/` or `priv/frontend` under the old name |
-| `persona_test.exs` (5) | the instruction loads, carries who she is / what she will not touch / that she is live, names every callable tool, and is shaped as the `Content` the setup message expects |
-| `live_session_test.exs` (3) | a stalled or dead session comes back as `{:error, {:exit, _}}` and the caller stays alive — the guardrail on the one call that sits in the audio path |
+| `persona_test.exs` (5) | the instruction loads, carries who she is / what she will not touch / that she is live, and names every callable tool |
+| `application_test.exs` (3) | one listener, bound to loopback, with everything it depends on started before it — and a killed child coming back |
 
 Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a dummy API key so config validation passes without one.
 
 ## Notes
 
-- **Voice** is a Gemini Live *native* voice (`LIVE_VOICE`, default `Aoede`) — the Live API has its own voice set, so it can't reproduce a TTS voice you used elsewhere. The persona carries the character, not the timbre.
-- **Barge-in** is client-side: the browser cuts playback the instant the mic hears you (RMS gate at `0.02` in `priv/frontend/main.js`). The server forwards `interrupted` too.
+- **Voice** is whatever the chosen backend offers — `GROK_LIVE_VOICE` (default `eve`) or `GOOGLE_LIVE_VOICE` (default `Aoede`). Each API has its own voice set, so neither can reproduce a TTS voice you used elsewhere. The persona carries the character, not the timbre.
+- **Barge-in** is client-side: the browser cuts playback the instant the mic hears you (RMS gate at `0.04` in `priv/frontend/main.js`). It was `0.02`, which room noise crossed at 0.021-0.023 and used to cut her off mid-word; a deliberate interruption reads 0.054. The server forwards `interrupted` too.
+- **The end of your turn** is decided by that same gate under `TURN_DETECTION=manual`, on the falling edge, spending the same silence budget the server VAD would have. Worth 833 ms, and it moves the false-turn risk from the provider to the browser. `idle_timeout_ms` lives inside the `turn_detection` this mode switches off, so there is no server-side safety net either — the worklet carries a 30 s max-utterance guard instead.
 - **Mic framing.** The worklet batches PCM into ~100 ms frames rather than emitting one per 128-sample render quantum — at 48 kHz that was 375 WebSocket frames/sec of ~85 bytes, where framing overhead dwarfed the audio. Barge-in can't wait for the batch, so a quantum that crosses the gate posts an RMS-only message immediately and the cut stays instant.
 - **The activity panel** is the browser's only proof the round trip closed: her voice says she booked it, the panel says the tool call actually came back.
 - **Concurrency** is where the BEAM pays off: each listener is an isolated, supervised process, so one dropped call never touches another. The failure this avoids is a single process holding N sessions and saturating.
