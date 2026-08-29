@@ -10,8 +10,16 @@ defmodule LiveCeci.TicketsTest do
     # Cleared, not swept. sweep/0 only drops what has expired, and the bound test leaves
     # 200 live tickets behind — every test after it then got {:error, :too_many} and
     # failed on a shape it never chose. Isolation has to be total or it is not isolation.
-    :ets.delete_all_objects(Tickets)
-    on_exit(fn -> :ets.delete_all_objects(Tickets) end)
+    # BOTH tables. Clearing only the ticket table left the refusal counter carrying every
+    # earlier test's refusals, so the rate assertion below saw whatever had accumulated
+    # instead of what this test caused — a failure that depended on the seed.
+    clear = fn ->
+      :ets.delete_all_objects(Tickets)
+      :ets.delete_all_objects(Module.concat(Tickets, Counters))
+    end
+
+    clear.()
+    on_exit(clear)
     :ok
   end
 
@@ -145,6 +153,44 @@ defmodule LiveCeci.TicketsTest do
 
       assert survived < 10,
              "the third address should have evicted some of the first's tickets"
+    end
+  end
+
+  describe "nothing slow on the upgrade path" do
+    test "a refusal costs a counter, not a log line" do
+      # issue/1 runs in the CONNECTION process, so logging a refusal there puts the
+      # logging backend on the upgrade path. Measured before the fix: 5 µs with the
+      # default handler, 3001 µs with a 2 ms sink standing in for a remote syslog. After:
+      # 1 µs either way.
+      #
+      # Asserted as a shape rather than a duration, because a timing assertion here would
+      # measure the machine: the rule is that issue/1 does not log, and the sweep timer
+      # reports the rate instead.
+      source = File.read!("lib/live_ceci/tickets.ex")
+      [_before, rest] = String.split(source, "def issue(address) do", parts: 2)
+      [issue_body, _] = String.split(rest, "\n  defp ", parts: 2)
+
+      refute issue_body =~ "Logger.",
+             "issue/1 logs — that puts the logging backend on the upgrade path"
+    end
+
+    test "the refusal rate is reported by the sweep timer" do
+      Application.put_env(:live_ceci, :max_tickets_per_address, 2)
+      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
+
+      for _ <- 1..5, do: Tickets.issue({10, 0, 0, 1})
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          pid = Process.whereis(Tickets)
+          send(pid, :sweep)
+          # :sys.get_state/1 is a call, so it queues BEHIND :sweep — which is what makes
+          # this deterministic. Without it capture_log returned before the GenServer had
+          # processed the message and the assertion saw an empty string.
+          :sys.get_state(pid)
+        end)
+
+      assert log =~ "refused 3 ws ticket(s)"
     end
   end
 

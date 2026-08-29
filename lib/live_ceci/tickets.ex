@@ -57,6 +57,8 @@ defmodule LiveCeci.Tickets do
   require Logger
 
   @table __MODULE__
+  # Separate from the ticket table so a sweep cannot delete the counter.
+  @counters Module.concat(__MODULE__, Counters)
   @ttl_ms 30_000
   @sweep_every_ms 60_000
 
@@ -78,11 +80,13 @@ defmodule LiveCeci.Tickets do
       count_for(address) >= max_per_address() ->
         # The bound that actually stops the flood, because it is scoped to whoever is
         # flooding. Refusing here denies one address, not everyone.
-        Logger.warning(
-          "refusing a ws ticket for #{:inet.ntoa(address)}: " <>
-            "#{max_per_address()} already outstanding from there"
-        )
-
+        #
+        # A counter, not a log line. issue/1 runs in the CONNECTION process, so a refusal
+        # that logs puts the logging backend on the upgrade path: measured at 5 µs with
+        # the default handler and 3001 µs with a 2 ms sink standing in for a network file
+        # or a remote syslog. Same shape, same fix, and the same reasoning as
+        # LiveCeci.Sessions — the rate is reported by the sweep timer, off any caller.
+        :ets.update_counter(@counters, :refused, 1, {:refused, 0})
         {:error, :too_many}
 
       true ->
@@ -195,6 +199,8 @@ defmodule LiveCeci.Tickets do
     # read-concurrent so issue/1 and consume/2 run in the caller — the upgrade path must
     # not queue behind a single process.
     :ets.new(@table, [:named_table, :public, :set, read_concurrency: true])
+    # write_concurrency because every refusal from every connection process writes here.
+    :ets.new(@counters, [:named_table, :public, :set, write_concurrency: true])
     schedule_sweep()
     {:ok, %{}}
   end
@@ -204,8 +210,25 @@ defmodule LiveCeci.Tickets do
     # consume/2 and issue/1 both drop expired entries as they go; this is for the table
     # that was written to once and then left alone.
     sweep()
+    report_refusals()
     schedule_sweep()
     {:noreply, state}
+  end
+
+  # The only place this module logs, and it is a timer rather than a caller. A rate is
+  # also the more useful thing to read: "refused 340 in the last 60s" answers a question
+  # that 340 identical lines answer worse.
+  defp report_refusals do
+    case :ets.take(@counters, :refused) do
+      [{:refused, n}] when n > 0 ->
+        Logger.warning(
+          "refused #{n} ws ticket(s) in the last #{div(@sweep_every_ms, 1000)}s " <>
+            "(cap #{max_per_address()} per address)"
+        )
+
+      _ ->
+        :ok
+    end
   end
 
   defp schedule_sweep, do: Process.send_after(self(), :sweep, @sweep_every_ms)
