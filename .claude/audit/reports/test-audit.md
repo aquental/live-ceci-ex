@@ -1,212 +1,125 @@
-# Test Health Re-Audit — live-ceci-ex
+# Test-Health Audit — live-ceci-ex
 
-Baseline: 88/B, 126 tests (2026-08-29). Now: 181 tests / 13 files, 83.92% coverage.
-Scope: judge the two new files (`tickets_test.exs`, `sessions_test.exs`) and the
-outstanding coverage/silent-breakage questions. Previously-fixed items are not
-re-reported.
+Method: static read-through of the seven changed/added test files plus the
+production modules they exercise (`LiveCeci.Tickets`, `LiveCeci.Limits`,
+`LiveCeci.Sessions`, `LiveCeci.Router`, `LiveCeci.Provider.Gemini`). **No Bash
+tool was available in this session, so the suite could not actually be run
+with varying `--seed` values as requested** — the findings below are derived
+from tracing the shared-state graph (ETS tables, GenServer singletons,
+`Application.put_env`) across `async: true` and `async: false` modules, which
+is where ExUnit's only real guarantee (`async: false` tests never run
+concurrently with *other* `async: false` tests — it says nothing about
+`async: true` tests) gets violated.
 
-## P1
+## P1 — order dependence / shared-global races
 
-### 1. `sessions_test.exs` on_exit cleanup is fire-and-forget, not synchronous — isolation is not actually total
-`test/live_ceci/sessions_test.exs:24-30`
+### 1. `TicketsTest.setup/0` unconditionally wipes the ETS table that `RouterTest` mints real tickets into, while the two run concurrently
+- `test/live_ceci/tickets_test.exs:16-24` — every test's `setup` does
+  `:ets.delete_all_objects(Tickets)` (and the counters table), with no
+  filtering, no scoping to the tracked addresses.
+- `test/live_ceci/router_test.exs:21-46,80-93` calls
+  `LiveCeci.Tickets.issue/1` for nearly every test in the file, against the
+  same named table (`LiveCeci.Tickets`, a process-global `:named_table`).
+- `TicketsTest` is `async: false`; `RouterTest` is `async: true`. ExUnit only
+  guarantees mutual exclusion between `async: false` modules — it does **not**
+  guarantee `RouterTest` won't be scheduled at the same time as
+  `TicketsTest`. When it is, `TicketsTest`'s setup can delete a ticket
+  `RouterTest` just minted a few lines earlier in `ws_conn/2`/`ticket_conn/2`,
+  between the `issue/1` call and the subsequent `call(conn)` that consumes
+  it.
+- What goes wrong: `router_test.exs:74-85` ("a ticket works exactly once")
+  expects the *first* `call/1` to succeed and only the *second* to 403. If
+  the table is wiped in between, the first call now sees `{:error, :invalid}`
+  too — the assertion `refute call(...).status == 403` fails, intermittently,
+  depending on scheduler timing/seed. Same exposure for every other
+  `router_test.exs` case that relies on a ticket it just minted.
 
-```elixir
-on_exit(fn ->
-  for pid <- Agent.get(spawned, & &1), do: Process.exit(pid, :kill)
-  Agent.stop(spawned)
-  ...
-end)
-```
+### 2. `TicketsTest`'s precise-count assertions assume it owns the whole table, but it doesn't when `RouterTest` runs at the same time
+- `test/live_ceci/tickets_test.exs:104-118` ("the global bound evicts…") and
+  `:120-137` ("derived, so the two cannot be raised out of step") both drop
+  `max_tickets_per_address` to 10 and then assert an *exact* global count:
+  `Tickets.outstanding() <= ceiling`, `Tickets.outstanding() == 20`.
+- `issue/1` (`lib/live_ceci/tickets.ex:101`) triggers eviction off
+  `:ets.info(@table, :size)` — the size of the **entire table**, not just the
+  tracked addresses. Any ticket `RouterTest` mints concurrently (different,
+  random addresses, `router_test.exs:22`) inflates that size, which (a) can
+  trigger `evict_from_largest/0` earlier than the test's own math accounts
+  for, and (b) `evict_from_largest/0` folds over the *whole* table
+  (`lib/live_ceci/tickets.ex:128-136`), so it can just as easily evict one of
+  `TicketsTest`'s own tracked tickets instead of a foreign one.
+- Net effect: `assert Tickets.outstanding() == 20` (line 134) and
+  `assert Enum.sum(held) == 20` (line 166, "eviction takes from whoever holds
+  the most") are exact-equality assertions against a table another test file
+  is concurrently writing into. These are flaky-by-construction, not just in
+  theory — the shared resource and the write pattern are both confirmed in
+  the code, only the interleaving is probabilistic.
+- Fix: either make `TicketsTest` and `RouterTest` mutually exclusive (mark
+  `RouterTest`'s ticket-dependent describes `async: false`, or give
+  `LiveCeci.Tickets` a per-test sandbox/table), or have `RouterTest` stop
+  routing through the real singleton for cases that don't test ticket
+  behaviour.
 
-The unlinked `Agent.start/1` (not `start_link`) is the *correct* choice — a linked
-Agent would die with the test process before `on_exit` runs, which is exactly the bug
-the comment describes. But the cleanup itself only **sends** kill signals; it never
-waits for the killed holders to actually die, and never waits for `LiveCeci.Sessions`
-(a separate GenServer, notified via its own `Process.monitor/1` on each holder) to
-process the resulting `:DOWN` and decrement its internal map. `on_exit` returns as
-soon as the `for` loop finishes issuing exits, which can be before the GenServer has
-reaped them.
+### 3. `LimitsTest`'s first test mutates global `Application` env with no `on_exit`, so a failing assertion leaves the corrupted value in place for every test that runs after it
+- `test/live_ceci/limits_test.exs:10-22`: loops `cap <- [1, 10, 150, 1_000]`,
+  calling `Application.put_env(:live_ceci, :max_tickets_per_address, cap)`
+  each iteration, and only calls `Application.delete_env/2` **after the loop
+  exits**, as a plain function call — not registered via `on_exit`.
+- If any iteration's `assert Limits.tickets_outstanding() == cap * 2` fails
+  (e.g. a regression in the derivation this test exists to guard), the test
+  process exits before reaching line 21, and `:max_tickets_per_address`
+  is left at whatever `cap` last ran (as high as `1_000`). Because
+  `LiveCeci.Tickets` reads this on every `issue/1` call
+  (`lib/live_ceci/tickets.ex:113-114`), every subsequent test in the run —
+  including all of `TicketsTest` and `RouterTest`'s per-address assumptions —
+  now runs against a 1000/2000 cap instead of the intended 10 or 150,
+  producing confusing secondary failures far from the actual regression.
+- This is exactly the "cleanup that does not run on failure" pattern the
+  audit was asked to hunt for, and it's the one file in this batch that
+  doesn't use `on_exit` for a global mutation, even though its own comment
+  ("async: false — every test here moves application env") shows the author
+  was aware of the global-state hazard.
 
-This matters specifically because this is the path exercised on a **failing**
-assertion mid-test (the comment literally says this mechanism exists so "a FAILING
-assertion still releases its slots") — i.e. the one case where nobody else in the
-test body is already polling for the release with `eventually/2`. Nothing downstream
-(this file, or the next sync-phase file) waits for or asserts a clean baseline before
-proceeding. In practice the GenServer reaps almost immediately, so this is unlikely to
-be visibly flaky today, but it is not the "total" isolation the comments claim, and it
-is the same race that afflicts finding #2 below.
+## P2 — assertions that would not fail if the code regressed
 
-Fix: after the kill loop, poll `Sessions.total()` (or a count scoped to the pids just
-killed) back to a known baseline before returning from `on_exit`, e.g. reuse the
-file's own `eventually/2`.
+### 4. `GeminiTest` "the callbacks session_opts/1 wires" only proves the closures are *reachable*, not that `session_opts/1` is the thing that built them correctly end-to-end
+- `test/live_ceci/provider/gemini_test.exs:204-238`: the setup calls
+  `Subject.session_opts(owner: self(), model: "m", voice: "v")` and each test
+  invokes one callback and asserts the resulting message. This is fine as far
+  as it goes, and the comment (lines 205-208) is honest that it's checking a
+  narrower claim than it looks. Flagging only because two of the five
+  callbacks (`on_transcription`, `on_tool_call`) are asserted with a single
+  example each and would not catch e.g. a swapped `:input`/`:output` tag
+  being reintroduced for one direction while the other direction's own test
+  (`"transcripts"` describe, line 95-102) already covers both — so the
+  *duplication* here buys real coverage, this is a genuine (if narrow)
+  strengthening, not a false-confidence test. No action needed beyond noting
+  it for whoever reads the coverage number: this describe block is
+  characterization, not specification, exactly as its own comment says.
 
-### 2. The "exactly 5 accepted" concurrency assertion assumes a clean `Sessions` baseline that nothing establishes or verifies
-`test/live_ceci/sessions_test.exs:121-134`
+### 5. `router_test.exs` X-Forwarded-For tests are order-independent from each other but silently depend on `TRUSTED_PROXIES` truly being `[]` between them
+- `test/live_ceci/router_test.exs:238-249` ("ignored while empty") has no
+  setup resetting `:trusted_proxies` itself; it relies on every *other* test
+  in the file cleaning up after itself via `on_exit` (lines 253, 266, 281,
+  296, 309). That's currently true, but there's no defensive assertion of the
+  precondition (contrast with `sessions_test.exs:45-46`, which does assert
+  its precondition). If a future edit to any of the proxy tests forgets its
+  `on_exit`, this test would start passing or failing depending on run order
+  with no error message pointing at the actual cause — the assertion
+  (`conn.remote_ip == {10, 0, 0, 1}`) gives no hint that the real problem is
+  stale global config.
 
-```elixir
-Application.put_env(:live_ceci, :max_sessions, 5)
-...
-assert length(accepted) == 5, "cap is 5 and #{length(accepted)} were accepted — ..."
-```
+## P3 — suggestions
 
-`Sessions` is a single named GenServer shared by the whole test run (both within this
-file and across `test/live_ceci/socket_lifecycle_test.exs`, see #3). The test never
-asserts or resets `Sessions.total() == 0` before spinning up 40 concurrent joins. If
-*any* holder from an earlier test/file has not yet been reaped (see #1 and #3), the
-cap of 5 is reached with fewer than 5 of *this test's* 40 joins — the assertion
-`length(accepted) == 5` fails on a correct implementation, i.e. a flake unrelated to
-the property under test.
-
-The core logic (GenServer serializes `join/1`, so under a clean baseline exactly 5
-of 40 concurrent arrivals are accepted) is sound and does distinguish the fixed
-design from the old Registry-based one (3 accepted). The problem is purely the
-missing baseline guarantee. Fix: assert/force `Sessions.total() == 0` (or drain to it
-with `eventually/2`) at the top of this test, not just rely on prior tests having
-"probably" cleaned up.
-
-### 3. Cross-file contamination: `socket_lifecycle_test.exs` and `sessions_test.exs` share the same singleton `Sessions` GenServer and the same default address, with no reset between them
-`test/live_ceci/socket_lifecycle_test.exs:49-84`, `test/live_ceci/sessions_test.exs` (whole file)
-
-`Socket.init([])` defaults `address` to `{127, 0, 0, 1}` (`lib/live_ceci/socket.ex:47`),
-the same `@local` address `sessions_test.exs` uses throughout. `socket_lifecycle_test.exs`
-calls `Socket.init([])` four times (two under `OkProvider`, two under `FailProvider`);
-every one of them calls `Sessions.join/1` for real (there is no mock/stub for
-`Sessions` — see also the note in #4) and holds a slot until the *test process*
-itself exits (the monitored pid is the caller of `join/1`, i.e. the ExUnit test
-process, not the spawned provider session — so this is not a permanent leak, but it
-is reaped asynchronously and on nobody's schedule). Both files are `async: false`, so
-ExUnit will run them one after another in the sync phase, but nothing sequences
-"finish reaping `socket_lifecycle_test`'s holders" before "start `sessions_test`'s
-first assertion of an exact count." `sessions_test.exs`'s first test
-(`"sessions are refused once the total is reached"`) sets `max_sessions: 3` and
-expects the 4th join across ALL addresses to be refused, with **no check that
-`Sessions.total()` starts at 0**. A handful of not-yet-reaped holders from
-`socket_lifecycle_test.exs` (or from a prior `describe` block in the same file, see
-#2) will make this fail one join earlier than the test expects.
-
-This is the concrete version of #1/#2's abstract race, and it is why "total
-isolation" is the wrong claim for this file as written.
-
-## P2
-
-### 4. `sessions_test.exs` and `tickets_test.exs` exercise the real singleton, not a scoped instance — no way to reset between describe blocks except ad hoc polling
-Both files rely on the *actual* running `LiveCeci.Sessions` / `LiveCeci.Tickets`
-singletons (started by the application supervision tree) rather than starting a
-private, uniquely-named instance per test. `tickets_test.exs` at least has a real
-reset primitive (`:ets.delete_all_objects(Tickets)` in `setup`/`on_exit`,
-`tickets_test.exs:13-14`) that fully clears state before every test — that one is
-sound. `sessions_test.exs` has no equivalent for its GenServer's internal map; the
-only recourse is polling with `eventually/2` after the fact, which is what produces
-findings #1–#3. Consider adding a test-only "reset" call (or starting a second,
-uniquely-named `Sessions` instance under `start_link/1` per test) the same way
-`tickets_test.exs` gets a hard reset via ETS.
-
-### 5. `redact_test.exs`'s grep guard only matches three hardcoded binding names
-`test/live_ceci/redact_test.exs:98-108`
-
-```elixir
-File.read!(path) =~ ~r/Logger\.\w+\([^)]*[^.]\binspect\((reason|msg|other)\b/
-```
-
-Same category of guard as `agent_name_test.exs` (asked about last audit, and
-reasonable there once anchored to real tokens). Here the anchoring is arguably too
-narrow rather than too loose: it only catches `inspect(reason|msg|other)` written
-*directly inside* a `Logger.\w+(...)` call. Two ways a future regression escapes it
-silently:
-  - a differently-named binding, e.g. `Logger.error("upstream: #{inspect(err)}")` or
-    `inspect(cause)` — anything other than `reason`/`msg`/`other`.
-  - building the string first and logging the variable, e.g.
-    `text = "failed: #{inspect(reason)}"; Logger.error(text)` — `inspect(reason)`
-    never appears inside the `Logger.\w+(...)` parens at all.
-The guard is legitimate (it pins a real historical incident, same as
-`agent_name_test.exs`) but should not be read as "nothing in lib/ leaks an upstream
-reason" — only "nobody reintroduced this exact textual shape." Consider widening to
-`inspect\(\w+\)` unconditionally inside any `Logger.\w+(...)` call (drop the specific
-name list), which would also catch `err`/`cause`/`e` at the cost of also flagging
-genuinely safe `inspect/1` calls that need an inline exclusion comment.
-
-### 6. `Provider.Grok` 78.87% — the gap is real code, not just dead branches, but it is inherent to a hand-rolled WebSockex client
-`lib/live_ceci/provider/grok.ex:38-79` (`open/1`'s WebSockex-backed branches)
-
-`grok_test.exs` covers `open/1`'s pure-guard path (missing key, `grok_test.exs:425-428`)
-and the failure-recovery half of the `send_json` error branch in isolation via
-`close/1` (`grok_test.exs:317-337`), but never exercises `open/1`'s two real
-`WebSockex.start_link/3` outcomes:
-  - the `{:ok, ws}` branch followed by a successful `send_json` (line 59-62) — the
-    actual happy path that returns `{:ok, ws}` from `open/1`.
-  - the `{:error, reason}` branch from `WebSockex.start_link/3` itself (line 76-78) —
-    connection refused / DNS failure / handshake rejection.
-  - the branch where `start_link` succeeds but `send_json` fails and `open/1` then
-    calls `close(ws)` before returning the error (line 64-73) — only `close/1`'s
-    *effect* is tested standalone, not that `open/1` actually reaches it on this path.
-  Also untested: `handle_frame(_frame, state)` catch-all (line 165), and
-  `decode_args/1`'s final catch-all for a non-map/non-binary payload (line 326,
-  reachable if the model sends `arguments` as e.g. a number or list).
-
-These require a live (or fake-listening) TCP endpoint to hit for real, which is a
-reasonable thing to leave to `priv/spike/` rather than unit tests — the moduledoc says
-as much. Flagging because it's the most-uncovered module and the gap is concentrated
-in exactly the two lines (72, 77) that hold the "already-billed, must close before
-returning" contract described in the comment at line 65-74 — that is the highest-value
-remaining gap, not a cosmetic one. A fake `:gen_tcp`/`WebSockex` stand-in (or extracting
-the post-`start_link` logic into a function that takes an injected `start_fun`) would
-let this be covered without a real socket.
-
-## P3
-
-### 7. Duplicated `eventually/2` poller now exists in three files
-`test/live_ceci/application_test.exs:47-53`, `test/live_ceci/sessions_test.exs:140-146`,
-`test/live_ceci/provider/grok_test.exs:273-279`
-
-Each copy is individually compliant with "no `Process.sleep` outside a poller," but
-there are now three near-identical private implementations instead of one shared
-helper (e.g. in `test/support/`). Minor DRY issue, and it slightly muddies the "only
-one poller in the whole suite" framing from the last audit — there are three
-call-sites of the same *pattern*, each with its own sleep.
-
-### 8. `sessions_test.exs`'s 1_000 ms `assert_receive` budgets under 40-way concurrency
-`test/live_ceci/sessions_test.exs:47, 54, 126`
-
-`holder/2`'s `assert_receive {:joined, result}, 1_000` runs inside 40 concurrent
-`Task.async_stream` workers in the race test, each doing a real `GenServer.call` to
-the same serialized `Sessions` process plus an `Agent.update/2` to a shared tracking
-Agent. On a loaded CI runner (shared/throttled CPU) 1 second is a plausible, if
-unlikely, place for the suite to flake on timeout rather than on the property under
-test. Not urgent, but worth a wider margin (e.g. 5_000 ms, matching the
-`Task.async_stream` timeout already used on the same line) since the whole point of
-this test is to *add* contention.
-
-## Answers to the specific questions
-
-- **Q1 (ordering/leakage/isolation):** Unlinked `Agent` choice is correct; the cleanup
-  built on it is not synchronous (P1 #1), and the file's assumption of a clean
-  `Sessions` baseline is never verified (P1 #2/#3, P2 #4).
-- **Q2 (exactly-5 assertion):** Logically sound given a clean baseline (GenServer
-  serialization makes 5-of-40 exact, unlike the Registry's 3-of-40), but nothing
-  guarantees the baseline is clean — see P1 #2/#3. It would still distinguish a
-  reverted Registry design from the current one; it will also produce false failures
-  unrelated to that regression under contamination.
-- **Q3 (redact_test grep guard):** Legitimate regression guard, same category as
-  `agent_name_test.exs`, but under-anchored (P2 #5) — three hardcoded variable names,
-  and only matches when `inspect(...)` is textually inside the `Logger.\w+(...)` call.
-- **Q4 (Grok 78.87%):** Uncovered code is `open/1`'s three `WebSockex.start_link`-backed
-  branches (lines 59-78, including the "close before returning" contract) plus two
-  catch-alls (`handle_frame/2` line 165, `decode_args/1` line 326). It matters — the
-  close-before-returning contract is the highest-value gap — but is hard to cover
-  without a fake transport (P2 #6).
-- **Q5 (silent breakage in lib/):** Cross-referenced against the new tests — the
-  clearest concrete case found is `Sessions`/`Socket.init` interaction (P1 #3): a
-  regression that made `Sessions.join/1` leak permanently (e.g. forgetting
-  `Process.monitor/1`) would eventually starve `sessions_test.exs`'s cap tests, but
-  slowly and only visibly as flakiness, not a deterministic failure pointing at the
-  actual bug.
-- **Q6 (runtime / async:false serialization):** `sessions_test.exs` and
-  `tickets_test.exs` are each internally serial in a way that's necessary (shared
-  singleton), but neither needs to block the *other* — they touch disjoint global
-  state (one GenServer map, one ETS table) and could both be `async: true` relative
-  to each other if each used its own dedicated, uniquely-named instance instead of the
-  app's singleton (see P2 #4). As written, all `async: false` files (`live_ceci_test`,
-  `application_test`, `redact_test`, `sessions_test`, `socket_lifecycle_test`,
-  `tickets_test`) run strictly serially in the sync phase after all `async: true`
-  modules finish, which is more serialization than strictly required but is the
-  correct trade-off given they share app-env/singleton state today.
+- `tickets_test.exs:229-246` and `sessions_test.exs:206-239` both reach into
+  `:sys.get_state/1` after `send/2` specifically to serialize against the
+  GenServer's mailbox before `capture_log`. This is good, deliberate, and
+  documented — no complaint, just noting it as the pattern to keep using
+  rather than `Process.sleep`, since it's exactly right.
+- Consider giving `LiveCeci.Tickets` (and `LiveCeci.Sessions`) a
+  test-only reset/isolation hook (e.g., a `start_link` per test with a
+  private table name) rather than relying on every caller across every test
+  file to coordinate through a shared named table by convention. The current
+  design works only as long as every test author remembers the "shared ETS
+  table" constraint documented in comments — the two P1 races above are
+  exactly what happens when that convention is not uniformly followed across
+  files owned by different describe blocks.
