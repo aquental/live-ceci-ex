@@ -81,6 +81,8 @@ defmodule LiveCeci.Socket do
            turn_detection: config.turn_detection
          ) do
       {:ok, session} ->
+        # So the cap can close it if this process dies without terminate/2 running.
+        LiveCeci.Sessions.attach(provider, session)
         Logger.info("live session open")
         {:ok, %{session: session, provider: provider}}
 

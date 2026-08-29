@@ -84,6 +84,17 @@ defmodule LiveCeci.Sessions do
     :exit, _reason -> true
   end
 
+  @doc """
+  Records the upstream session this connection opened, so it can be closed if the
+  connection dies without cleaning up after itself.
+
+  Fire and forget: a cast, because the socket is about to start carrying audio and has
+  nothing to learn from the answer.
+  """
+  @spec attach(module(), term()) :: :ok
+  def attach(provider, session),
+    do: GenServer.cast(__MODULE__, {:attach, self(), provider, session})
+
   @doc "How many sessions are live right now."
   @spec total() :: non_neg_integer()
   def total, do: GenServer.call(__MODULE__, :total)
@@ -113,7 +124,9 @@ defmodule LiveCeci.Sessions do
 
       true ->
         Process.monitor(pid)
-        {:reply, :ok, %{state | holders: Map.put(holders, pid, address)}}
+
+        {:reply, :ok,
+         %{state | holders: Map.put(holders, pid, %{address: address, session: nil})}}
     end
   end
 
@@ -128,7 +141,19 @@ defmodule LiveCeci.Sessions do
     do: {:reply, count_for(state.holders, address), state}
 
   @impl GenServer
+  def handle_cast({:attach, pid, provider, session}, state) do
+    holders =
+      case Map.fetch(state.holders, pid) do
+        {:ok, held} -> Map.put(state.holders, pid, %{held | session: {provider, session}})
+        :error -> state.holders
+      end
+
+    {:noreply, %{state | holders: holders}}
+  end
+
+  @impl GenServer
   def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    close_upstream(Map.get(state.holders, pid))
     {:noreply, %{state | holders: Map.delete(state.holders, pid)}}
   end
 
@@ -150,8 +175,19 @@ defmodule LiveCeci.Sessions do
 
   defp schedule_report, do: Process.send_after(self(), :report, @report_every_ms)
 
+  # In a task, and unlinked: provider.close/1 goes to the network, and nothing that goes
+  # to the network belongs inside the process every upgrade queues behind. Both providers
+  # document close/1 as tolerating an already-closed session, which is what makes calling
+  # it here safe when Socket.terminate/2 already did.
+  defp close_upstream(%{session: {provider, session}}) do
+    Task.start(fn -> provider.close(session) end)
+    :ok
+  end
+
+  defp close_upstream(_held), do: :ok
+
   defp count_for(holders, address) do
-    Enum.count(holders, fn {_pid, held} -> held == address end)
+    Enum.count(holders, fn {_pid, held} -> held.address == address end)
   end
 
   defp max_total, do: Application.get_env(:live_ceci, :max_sessions, 8)

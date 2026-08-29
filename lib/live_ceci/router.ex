@@ -129,6 +129,11 @@ defmodule LiveCeci.Router do
           # ticket still valid, instead of consuming it and then answering a completed
           # handshake with a 1013 close. Advisory only — LiveCeci.Socket.init/1 still
           # makes the authoritative claim, and still refuses if this raced.
+          # Yes, this is a second call to the Sessions singleton alongside join/1 in
+          # Socket.init/1, and an audit flagged the duplication. Kept deliberately: the
+          # pair is what preserves the ticket on a capacity refusal, and both calls
+          # together cost roughly 12 µs against a connection setup that spends hundreds
+          # of milliseconds opening the upstream session.
           not LiveCeci.Sessions.available?(conn.remote_ip) ->
             Logger.warning("refusing /ws upgrade at capacity")
             conn |> send_resp(503, "muitas conexões — tente daqui a pouco") |> halt()

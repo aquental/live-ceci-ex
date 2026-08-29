@@ -121,6 +121,12 @@ config :live_ceci,
   # holds an upstream session that is billed while it lives, and eight tabs is eight of
   # them. Bound to loopback the two numbers coincide; they stop coinciding the moment
   # BIND_IP opens.
+  #
+  # What actually limits these is NOT this machine. Measured: file descriptors, ports and
+  # processes all cap at 1_048_576 here, and LiveCeci.Sessions costs microseconds per
+  # connection at any setting worth using. The binding constraint is the provider's own
+  # concurrency and rate limits, which are not documented and were not tested — raising
+  # MAX_SESSIONS is a question for xAI or Google, not for this file.
   max_sessions: LiveCeci.env_int("MAX_SESSIONS", 8, 1..1_000),
   max_sessions_per_address: LiveCeci.env_int("MAX_SESSIONS_PER_ADDRESS", 4, 1..1_000),
   allowed_origins:

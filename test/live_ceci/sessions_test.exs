@@ -103,6 +103,50 @@ defmodule LiveCeci.SessionsTest do
     end
   end
 
+  describe "the upstream backstop" do
+    # This codebase has lost a billed upstream session three separate times, each through
+    # a different door, and links caught none of them. Socket.terminate/2 closes the
+    # session on an ordinary close; this covers the case where terminate never runs.
+
+    defmodule ClosingProvider do
+      @behaviour LiveCeci.Provider
+      def open(_opts), do: {:error, :unused}
+      def send_audio(_s, _pcm), do: :ok
+      def commit_turn(_s), do: :ok
+      def close({owner, tag}), do: send(owner, {:closed, tag}) && :ok
+    end
+
+    test "a brutally killed connection still has its upstream closed", %{spawned: spawned} do
+      test = self()
+
+      pid =
+        spawn(fn ->
+          :ok = Sessions.join(@local)
+          Sessions.attach(ClosingProvider, {test, :from_backstop})
+          send(test, :attached)
+          receive do: (:never -> :ok)
+        end)
+
+      Agent.update(spawned, &[pid | &1])
+      assert_receive :attached, 1_000
+      # A cast, so give it a moment to land before the process dies.
+      assert eventually(fn -> Sessions.total() == 1 end)
+
+      # Killed. terminate/2 does not run, no cleanup gets the chance.
+      Process.exit(pid, :kill)
+
+      assert_receive {:closed, :from_backstop}, 1_000
+      assert eventually(fn -> Sessions.total() == 0 end)
+    end
+
+    test "a connection that never attached does not break the release", %{spawned: spawned} do
+      {pid, :ok} = holder(spawned)
+      Process.exit(pid, :kill)
+
+      assert eventually(fn -> Sessions.total() == 0 end)
+    end
+  end
+
   describe "release without cleanup" do
     test "a slot is released when its process dies, with no cleanup running", %{spawned: spawned} do
       # The property that survived the rewrite from Registry to GenServer, because it is
