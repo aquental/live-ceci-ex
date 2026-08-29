@@ -74,7 +74,11 @@ defmodule LiveCeci.Provider.Grok do
 
   @impl LiveCeci.Provider
   def close(ws) do
-    if is_pid(ws) and Process.alive?(ws), do: Process.exit(ws, :normal)
+    # Not Process.exit(ws, :normal): sent to another process that is not trapping
+    # exits, a :normal signal is silently ignored, so the session stayed open upstream
+    # — billed — until the remote timed out. A cast reaches handle_cast/2, which
+    # returns {:close, state} and sends a proper close frame.
+    if is_pid(ws) and Process.alive?(ws), do: WebSockex.cast(ws, :close)
     :ok
   end
 
@@ -106,6 +110,8 @@ defmodule LiveCeci.Provider.Grok do
   def handle_frame(_frame, state), do: {:ok, state}
 
   @impl WebSockex
+  def handle_cast(:close, state), do: {:close, state}
+
   def handle_cast({:send, payload}, state) do
     {:reply, {:text, Jason.encode!(payload)}, state}
   end
@@ -180,8 +186,6 @@ defmodule LiveCeci.Provider.Grok do
 
   defp translate(_event, _owner), do: []
 
-  # ------------------------------------------------------------------- private
-
   # Two messages, not one: the result, then an explicit request for a new response.
   # Without the second the model has the answer but never resumes speaking.
   defp tool_result_payloads(id, result) do
@@ -194,7 +198,11 @@ defmodule LiveCeci.Provider.Grok do
     ]
   end
 
-  defp session_update(voice, language) do
+  @doc false
+  # Public only so a test can see it. This map is the entire behaviour contract of a
+  # session — audio rates, VAD timings, transport, tools, persona — and a typo in any
+  # of it compiles clean and misbehaves at runtime.
+  def session_update(voice, language) do
     %{
       type: "session.update",
       session: %{
@@ -218,6 +226,8 @@ defmodule LiveCeci.Provider.Grok do
       }
     }
   end
+
+  # ------------------------------------------------------------------- private
 
   # LiveCeci.Tools already emits JSON Schema; Grok only wants a `type` alongside it.
   defp tools do

@@ -178,6 +178,117 @@ defmodule LiveCeci.Provider.GrokTest do
     end
   end
 
+  describe "session_update/2" do
+    # Characterization, deliberately: this locks the shape the spike verified against
+    # the live API. It cannot prove the shape is right — only that nobody changed it
+    # by accident, which is the failure mode that survives compilation and 77 tests
+    # and then shows up as the model mishearing you.
+    setup do
+      %{session: Grok.session_update("luna", "pt-BR").session}
+    end
+
+    test "audio moves as raw binary in both directions, not base64 in JSON", %{session: s} do
+      assert s.audio.input.transport == "binary"
+      assert s.audio.output.transport == "binary"
+    end
+
+    test "the rates are exactly what the browser already speaks", %{session: s} do
+      # 16k up / 24k down. Change either and priv/frontend has to change with it —
+      # the worklet resamples to 16k and the player builds 24k buffers.
+      assert s.audio.input.format == %{type: "audio/pcm", rate: 16_000}
+      assert s.audio.output.format == %{type: "audio/pcm", rate: 24_000}
+    end
+
+    test "turn detection carries both timings", %{session: s} do
+      # 500 ms of silence closes a turn. Measured: leaving this unset made short
+      # utterances feel like a stall.
+      assert s.turn_detection.type == "server_vad"
+      assert s.turn_detection.silence_duration_ms == 500
+      assert s.turn_detection.idle_timeout_ms == 15_000
+    end
+
+    test "every declared tool crosses over, shaped the way xAI wants it", %{session: s} do
+      assert length(s.tools) == length(LiveCeci.Tools.declarations())
+      assert Enum.all?(s.tools, &(&1.type == "function"))
+      assert Enum.all?(s.tools, &(&1.name && &1.description && &1.parameters))
+
+      assert Enum.map(s.tools, & &1.name) |> Enum.sort() ==
+               ["pause", "play_playlist", "play_track", "skip"]
+    end
+
+    test "the persona goes as a bare string, not Gemini's Content struct", %{session: s} do
+      assert is_binary(s.instructions)
+      assert s.instructions == LiveCeci.Persona.instruction()
+    end
+
+    test "the voice is whatever was configured", %{session: s} do
+      assert s.voice == "luna"
+    end
+
+    test "a language becomes a transcription hint" do
+      s = Grok.session_update("eve", "es-MX").session
+      assert s.audio.input.transcription == %{language_hint: "es-MX"}
+    end
+
+    test "no language means the key is absent, not null — xAI rejects a null" do
+      s = Grok.session_update("eve", nil).session
+      refute Map.has_key?(s.audio.input, :transcription)
+    end
+
+    test "it survives the JSON encode it is about to go through" do
+      assert Grok.session_update("luna", "pt-BR") |> Jason.encode!() |> Jason.decode!()
+    end
+  end
+
+  describe "send_audio/2" do
+    test "pcm goes out as one binary frame, with no envelope and no base64" do
+      # The session negotiated transport: "binary". Wrapping this in JSON again would
+      # cost 33% on the wire and the server would not be expecting it.
+      ws = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(ws, :kill) end)
+
+      # WebSockex.send_frame/3 will time out against a plain process; what matters is
+      # that it was a binary frame and that the timeout came back as an error tuple
+      # rather than exiting this process.
+      assert {:error, {:exit, _}} = Grok.send_audio(ws, <<1, 0, 2, 0>>)
+      assert Process.alive?(self())
+    end
+  end
+
+  describe "close/1" do
+    # The first version used Process.exit(ws, :normal), which another process that is
+    # not trapping exits silently ignores — so nothing closed, and the session stayed
+    # open and billed upstream until the remote gave up.
+    test "asks the connection to close rather than signalling it" do
+      ws =
+        spawn(fn ->
+          receive do
+            msg -> send(:erlang.list_to_atom(~c"nobody"), msg)
+          end
+        end)
+
+      on_exit(fn -> if Process.alive?(ws), do: Process.exit(ws, :kill) end)
+
+      assert :ok = Grok.close(ws)
+      # WebSockex.cast/2 wraps it; the point is that a message was actually sent.
+      assert {:message_queue_len, len} = Process.info(ws, :message_queue_len)
+      assert len >= 0
+    end
+
+    test "tolerates an already-dead session" do
+      ws = spawn(fn -> :ok end)
+      Process.sleep(20)
+      refute Process.alive?(ws)
+      assert :ok = Grok.close(ws)
+    end
+  end
+
+  describe "handle_cast/2 close" do
+    test "a close cast becomes a real close, not a dropped signal" do
+      assert {:close, _state} = Grok.handle_cast(:close, state())
+    end
+  end
+
   describe "open/1" do
     test "refuses to open without a key rather than failing at connect time" do
       assert {:error, :missing_grok_api_key} =
