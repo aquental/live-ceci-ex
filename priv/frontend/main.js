@@ -10,6 +10,8 @@ const orb = $("orb"), statusEl = $("status"), actEl = $("activity"), txEl = $("t
 const BARGE_RMS = 0.04;
 // Roughly a second of 16 kHz PCM in flight. Past that the link is not keeping up.
 const MAX_BUFFERED = 32000;
+// Roughly 30 s of queued 100 ms chunks. Past that, onended is not doing its job.
+const MAX_SOURCES = 300;
 let dropped = 0;
 let ws, audioCtx, workletNode, micStream;
 // Server-owned settings, fetched once from /config.json. Null until then; go() waits
@@ -68,7 +70,18 @@ function playVoice(buf) {
   if (nextStart < now) nextStart = now;
   src.start(nextStart); nextStart += ab.duration;
   activeSources.push(src);
-  src.onended = () => { activeSources = activeSources.filter((s) => s !== src); if (!activeSources.length) { speaking = false; setOrb("listening"); } };
+  // onended is the only thing that empties this list, and it is not guaranteed: a
+  // suspended context, a tab in the background, or a source stopped in a way the browser
+  // does not report leaves entries behind forever. Sweep anything already finished, so a
+  // long call cannot accumulate them.
+  if (activeSources.length > MAX_SOURCES) {
+    activeSources = activeSources.filter((s) => s.__done !== true);
+  }
+  src.onended = () => {
+    src.__done = true;
+    activeSources = activeSources.filter((s) => s !== src);
+    if (!activeSources.length) { speaking = false; setOrb("listening"); }
+  };
   speaking = true; setOrb("speaking");
 }
 function stopVoice() {                                                     // barge-in
