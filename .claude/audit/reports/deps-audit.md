@@ -1,155 +1,128 @@
-# Dependency Audit — live_ceci
+# Dependency Re-Audit — 2026-08-29
 
-Date: 2026-08-29
-Scope: supply-chain / version-constraint / maintenance-risk review. Vulnerability and
-staleness scans already run and closed (`mix hex.audit`: no advisories; `mix deps.audit`:
-no vulnerabilities; `mix hex.outdated`: everything up to date). This report covers
-everything *those* tools cannot see.
-
-No "unused dependency" findings — every entry in `mix.exs` (`bandit`, `plug`, `websockex`,
-`websock_adapter`, `gemini_ex`, `jason`, `mix_audit`) has confirmed call sites in `lib/` or
-`test/`.
-
----
+Follow-up to the 95/A audit. `mix hex.audit` / `mix deps.audit` re-confirmed clean
+(no retired/advisory packages, no vulnerabilities); 0 xref cycles. Previously-fixed
+items (mix.exs constraints, websock direct declaration, `.tool-versions`, CI file,
+gemini_ex internal-call regression test) verified present and correct — not re-listed
+below except where a new angle surfaced.
 
 ## P1
 
-### 1. `gemini_ex`'s documented safety net ("drift is a runtime error") is false for 3 of 4 integration points
-
-`mix.exs:32-36` and `README.md:116` both justify the `~> 0.17.0` minor-pin by claiming that
-if `gemini_ex` changes its struct/message shape, "drift surfaces as a runtime error, not a
-compile one." That is only true for one of the four places this app touches `gemini_ex`
-internals. The other three degrade **silently**:
-
-- `lib/live_ceci/provider/gemini.ex:114` — `def translate(_other, _owner), do: :ok` catches
-  anything that doesn't match `%ServerMessage{server_content: %ServerContent{}}`. If
-  `gemini_ex` ever renames/restructures `ServerContent` (it already changed the Live
-  transport once, in 0.16.0), voice output and barge-in (`interrupted`) stop working with
-  **no log line, no crash, no test failure in prod** — audio just silently stops decoding.
-- `lib/live_ceci/provider/gemini.ex:124` — `def translate_transcript(_other, _owner), do: :ok`
-  is the same trap for transcripts.
-- `lib/live_ceci/provider/gemini.ex:99` — `def handle_tool_call(_tool_call, _owner), do: :ok`
-  is the same trap for tool dispatch (agendar/presença/recibo/resumo).
-
-Only `lib/live_ceci/live_session.ex:33-39` (`GenServer.call` to the internal
-`{:send_realtime_input, ...}` message) actually produces a catchable `{:error, {:exit,
-reason}}`, and even that is logged only as `Logger.warning` (`socket.ex:86`), not raised.
-
-Net effect: the pin protects compilation, but the comment overstates what happens at
-runtime for 3 of 4 paths. The real safety net is the test suite
-(`test/live_ceci/provider/gemini_test.exs` does construct real `Gemini.Types.Live.*`
-structs, so a shape change would fail tests) — but there is no CI (see P2 §6) to run that
-suite automatically on `mix deps.update`, so the net only fires if a human remembers to run
-`mix test` after bumping `gemini_ex`.
-
-**Fix**: either add explicit `else`/logging clauses instead of bare catch-alls (turn silent
-`:ok` into a logged warning, mirroring `live_session.ex`), or correct the comment/README to
-stop promising a runtime error that three of the four paths don't produce.
-
-### 2. `gemini_ex` bus-factor and churn are high for a library whose internals this app calls directly
-
-- Single maintainer (`nshkrdotcom`), 43 published versions to reach 0.17.0.
-- Release cadence has been roughly every 1–3 weeks for the last several releases
-  (0.13.0 and 0.12.0 same day 2026-04-02; 0.14.0 2026-06-16; 0.15.0 2026-07-27; 0.16.0
-  2026-08-10; 0.17.0 2026-08-21 — 8 days before this audit).
-- Adoption is small: 306 downloads in the last 30 days, 13,261 all-time, 4 dependants on
-  Hex.
-- `CHANGELOG.md` 0.16.0 confirms the exact risk `mix.exs:34` already warned about: "Replaced
-  the Gun/Cowlib Live WebSocket stack with WebSockex" — a transport swap in a *minor*
-  release, for a library this app pattern-matches structs from and calls an internal
-  GenServer message on (`live_session.ex:33`).
-
-The `~> 0.17.0` pin is doing real work and is the right call, but it only holds until the
-next intentional bump. Given the combination of (single maintainer + internal-API coupling
-+ demonstrated willingness to swap transports in a minor + no CI to gate the bump), an
-upgrade to 0.18.x should be treated as a mandatory-review event, not a routine `mix
-deps.update`, and the two call sites in Finding 1 should get explicit fallback logging
-before that bump is attempted.
-
----
+None.
 
 ## P2
 
-### 3. `websockex` and `websock_adapter` both use loose two-segment `~>` requirements on pre-1.0 packages
+1. **`.formatter.exs` doesn't cover `priv/`, so CI's format gate never checks
+   `priv/spike/latency_bench.exs`.**
+   `/Users/aquental/projects/ai/google/live-ceci-ex/.formatter.exs:3` — `inputs` is
+   `["{mix,.formatter}.exs", "{config,lib,test}/**/*.{ex,exs}"]`. There is no `priv/**`
+   glob. `mix format --check-formatted` in CI
+   (`.github/workflows/ci.yml`) silently passes regardless of that file's formatting —
+   this is exactly the "let a broken commit through" gap the audit asked about, scoped
+   to the one `.exs` file that lives outside `lib`/`test`. Add `"priv/**/*.exs"` (or
+   `"priv/spike/**/*.exs"`) to `inputs`.
 
-- `mix.exs:30` — `{:websockex, "~> 0.4"}` resolves to `>= 0.4.0 and < 1.0.0`.
-- `mix.exs:31` — `{:websock_adapter, "~> 0.5"}` resolves to `>= 0.5.0 and < 1.0.0`.
+2. **`mix.exs`'s `elixir: "~> 1.17"` no longer reflects what's actually built/tested.**
+   `/Users/aquental/projects/ai/google/live-ceci-ex/mix.exs:8` vs `.tool-versions:2`
+   (`elixir 1.20.4-otp-29`). `~> 1.17` accepts anything from 1.17.0 up to (not
+   including) 2.0 — a contributor on a stray local 1.17–1.19 toolchain passes the
+   `mix.exs` floor check and compiles, while CI's `version-type: strict` only ever
+   builds against exactly 1.20.4. That's a silent floor/CI mismatch, not a hardening
+   nicety: a contributor could ship code that behaves differently under 1.17 (a
+   removed deprecation warning, a stdlib difference) and have no local signal before
+   push. Tighten to `"~> 1.20"` to match what CI actually exercises — the file's own
+   comment already admits this ("says nothing about the ceiling").
 
-For a 0.x package, Hex's own convention (and this project's own practice for `gemini_ex`,
-`mix.exs:37`, `~> 0.17.0` three-segment) is to pin to the minor with a three-segment
-requirement, because 0.x minor bumps are allowed to break under semver. A two-segment `~>`
-on a 0.x dependency defeats that protection — `mix deps.update websock_adapter` could
-legally jump to 0.99.0 without mix.exs ever needing to change.
+3. **CI runs `mix deps.audit` but not `mix hex.audit`, even though the two check
+   different signals.** `.github/workflows/ci.yml` — the comment above the
+   `deps.audit` step explains `hex.audit` "only reads maintainer retirement flags,"
+   which is true but is an argument for running *both*, not for dropping the cheaper
+   one. A maintainer retiring a package (e.g. citing an unpatched flaw) can predate a
+   formal advisory entry landing in the DB `deps.audit` reads. One extra line
+   (`mix hex.audit`) costs nothing in a job that already runs `deps.get`.
 
-Notably, `gemini_ex` itself is stricter about the same library than this app is:
-`mix.lock` shows `gemini_ex` requires `{:websockex, "~> 0.5.1", ...}` (three-segment,
-`>= 0.5.1 and < 0.6.0`), while this app's own direct requirement (`~> 0.4`) is looser than
-what its own transitive dependency demands of the same package.
-
-**Fix**: tighten both to three-segment requirements matching the resolved lock versions,
-e.g. `{:websockex, "~> 0.5.1"}`, `{:websock_adapter, "~> 0.6.0"}`.
-
-### 4. `websock` is a phantom direct dependency
-
-`lib/live_ceci/socket.ex:32` declares `@behaviour WebSock` and uses `@impl WebSock` four
-times — this is a compile-time contract with the `websock` package. `websock` is not listed
-in `mix.exs` at all; it arrives transitively through `websock_adapter` (and `bandit`, which
-also requires it). Nothing in this app's own dependency declarations protects that
-`@behaviour` contract if `bandit` or `websock_adapter` ever relax or drop their `websock`
-requirement.
-
-**Fix**: add `{:websock, "~> 0.5"}` directly to `mix.exs`, matching the version this app's
-code actually programs against.
-
-### 5. `websockex`'s blast radius doubled without the app's mix.exs reflecting it, and its source link is stale
-
-- `websockex` hex.pm ownership was transferred from the original maintainer (Azolo) to the
-  `witchtails` organization on 2025-11-13; the actual maintenance is by Dominic Letz
-  (`witchtails/websockex_wt`, a fork of `dominicletz/websockex`), with two releases since
-  (0.5.0 on 2025-11-23, 0.5.1 on 2025-12-01). This is **not abandonment** — it's active,
-  named maintenance — but it is a maintainer change less than a year old for a package that
-  is now load-bearing for *two* independent things:
-  1. `LiveCeci.Provider.Grok` (`lib/live_ceci/provider/grok.ex`), hand-rolled, as documented.
-  2. As of `gemini_ex` 0.16.0 (2026-08-10), `gemini_ex`'s own Live WebSocket transport also
-     now runs on WebSockex (replacing Gun/Cowlib) — confirmed in
-     `deps/gemini_ex/CHANGELOG.md`.
-
-  A regression in `websockex` today would take down *both* voice backends, not just the
-  Grok path the mix.exs comment (`mix.exs:27-29`) frames it around. Worth re-reading that
-  comment's "already in the tree via gemini_ex" note in light of this — it's still true, but
-  the reason it's true has changed (used to be an unrelated transitive dep; now it's the
-  same transport gemini_ex itself relies on).
-- Cosmetic but worth fixing while touching this: `deps/websockex/mix.exs` (the installed
-  package's own metadata) still declares `source_url: "https://github.com/Azolo/websockex"`
-  even though the maintainer/package field points at
-  `"https://github.com/witchtails/websockex_wt"`. Not something this app controls, but
-  don't trust the `source_url` in HexDocs for this package — use the `links` field.
-
-### 6. No toolchain pin and no CI — reproducibility rests on this one machine's state
-
-- `mix.exs:8` — `elixir: "~> 1.17"` resolves to `>= 1.17.0 and < 2.0.0`: any future 1.x is
-  accepted, unbounded.
-- No `.tool-versions`, no `.mise.toml`, nothing pinning an Elixir/OTP pair anywhere in the
-  repo.
-- No CI config found anywhere in the repo (`find . -iname "*.yml" -o -iname "*.yaml"`
-  returned nothing outside `deps/`/`_build/`).
-- The machine this audit ran on is already on Elixir 1.20.4 / OTP 29 — several minors ahead
-  of anything the `~> 1.17` floor was written against, and there is no automated job that
-  has ever compiled+tested this exact combination other than this ad hoc session.
-
-Combined with Findings 1–2 (an upstream dependency that changes internals on minor bumps),
-the absence of CI means the one thing that would actually catch a `gemini_ex`/`websockex`
-regression automatically — `mix compile --warnings-as-errors && mix test` running on every
-dependency bump — doesn't exist. `mix_audit` (`mix.exs:41`) only catches *known* CVEs, not
-API drift.
-
-**Fix**: add a `.tool-versions` (or `.mise.toml`) pinning the exact Elixir/OTP pair this app
-is verified against, and a minimal CI workflow running
-`mix deps.get && mix compile --warnings-as-errors && mix format --check-formatted && mix test`
-at minimum on every push/PR.
-
----
+4. **CI still doesn't gate on `mix xref` (confirmed, as flagged in the audit brief).**
+   The graph is 13 modules / 0 cycles today, cheap to keep true by construction. With
+   no step enforcing it, a future PR can introduce a cycle or an unreachable/dead
+   call and nothing in CI notices — `mix compile --warnings-as-errors` catches
+   statically-resolvable undefined calls but not xref's broader cross-module checks
+   (`mix xref graph --format cycles`, `mix xref unreachable`). Worth adding while the
+   graph is small enough that a regression is trivial to unwind.
 
 ## P3
 
-None.
+5. **`actions/cache` key never changes when `.tool-versions` bumps.**
+   `.github/workflows/ci.yml` — `key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}`
+   with `restore-keys: ${{ runner.os }}-mix-`. Bumping the OTP/Elixir pin without
+   touching `mix.lock` restores a `deps`/`_build` tree built under the old toolchain;
+   Mix's own manifest-version check forces a recompile on a real Elixir-version
+   mismatch, so this is unlikely to corrupt a build today, but it's dead weight in the
+   cache and would start mattering the moment anything version-sensitive is cached
+   here (a Dialyzer PLT, a NIF). Folding `hashFiles('.tool-versions')` into the key
+   costs one token and removes the question.
+
+6. **No `permissions:` block on the workflow.** `.github/workflows/ci.yml` — defaults
+   to the repo's broadest default `GITHUB_TOKEN` scope for a job that only needs to
+   read the checkout and never writes anything back. Add `permissions: contents: read`
+   at the workflow or job level.
+
+7. **`{:websock, "~> 0.5"}` is looser than the app's own stated rationale for
+   depending on it directly.** `mix.exs:22` — the comment explains websock is declared
+   directly *because* `LiveCeci.Socket` implements `@behaviour WebSock`, i.e. the same
+   "a behaviour you implement is a dependency you have" argument the file makes for
+   pinning `gemini_ex` and `websockex` tighter. `~> 0.5` and `~> 0.5.3` (the version
+   actually locked) have the same upper bound, so this changes nothing today, but for
+   consistency with the file's own reasoning it should read `~> 0.5.3`.
+
+8. **`erlef/setup-beam@v1` floats on a major-version tag.** `.github/workflows/ci.yml:21`
+   — acceptable and idiomatic in the Elixir ecosystem, but note for the record since
+   `actions/checkout` and `actions/cache` are first-party GitHub actions and this one
+   isn't; a stricter supply-chain posture would pin to a release tag or SHA.
+
+9. **No scheduled (cron) re-run of the advisory checks.** Both `mix deps.audit` and
+   (recommended above) `mix hex.audit` only run on push/PR. A newly-disclosed CVE
+   against an already-merged dependency version won't surface until the next commit
+   touches this repo. A weekly `schedule:` trigger would close that gap; low priority
+   given the dependency count (8 direct, 19 total).
+
+## Verified, no new finding
+
+- **`mix hex.outdated`**: every direct dependency (`bandit` 1.12.5, `gemini_ex` 0.17.0,
+  `jason` 1.4.5, `plug` 1.20.3, `websock` 0.5.3, `websock_adapter` 0.6.0, `websockex`
+  0.5.1, `mix_audit` 2.1.5) is already at latest. Nothing moved since the last audit.
+- **`gemini_ex`**: 0.17.0 (2026-08-21) remains latest on Hex; no `[Unreleased]` entries
+  in its `CHANGELOG.md`, no commits past the 0.17.0 tag on GitHub. The internal
+  `{:send_realtime_input, opts}` `handle_call` clause the regression test guards is
+  still present at `deps/gemini_ex/lib/gemini/live/session.ex:448`. Risk profile
+  (single maintainer, internal message + struct pattern-matching) is unchanged, not
+  worsened — CHANGELOG shows 0.16.0 already swapped the Live transport once (Gun/Cowlib
+  → WebSockex), which is the precedent the app's own pinning comment is guarding
+  against.
+- **Dependency usage audit**: every declared dep has a genuine (non-comment) call site
+  — `bandit` (`application.ex`), `plug` (`router.ex`), `websockex` (`provider/grok.ex`,
+  `priv/spike/latency_bench.exs`), `websock_adapter` (`router.ex`), `websock`
+  (`socket.ex`, `@behaviour WebSock`), `gemini_ex` (`live_session.ex`,
+  `provider/gemini.ex` — real `alias Gemini.Live.*` / `Gemini.Types.Live.*` usage, not
+  just doc mentions), `jason` (`socket.ex`, `router.ex`, `provider/grok.ex`),
+  `mix_audit` (dev/test tool, invoked as a Mix task, no code reference expected).
+  Nothing declared is unused; nothing used is undeclared **except** the item below.
+- **`:crypto` (used in `lib/live_ceci/tickets.ex:67`, `:crypto.strong_rand_bytes/1`) is
+  not in `extra_applications`** (`mix.exs:16` lists only `:logger`). This is not
+  currently broken — `:crypto` is guaranteed to already be started transitively
+  (gemini_ex → req → finch → mint → `:ssl`, which itself depends on `:crypto`), so a
+  release boots it regardless. It is, however, an *implicit* invariant resting on a
+  transport three dependencies away that this project's own comments describe as
+  already having been swapped once (Gun/Cowlib → WebSockex in gemini_ex 0.16.0). If
+  that HTTP stack is ever removed or swapped for something that doesn't pull `:ssl`,
+  `tickets.ex` fails at runtime with `:undef` on `strong_rand_bytes/1` with no compile
+  warning. Cheap to make explicit: add `:crypto` to `extra_applications`.
+- **`priv/spike/latency_bench.exs` really does avoid `:inets`** — it authors a
+  10-line hand-rolled HTTP/1.1 request over `:gen_tcp` (`priv/spike/latency_bench.exs:408-427`)
+  specifically because `:inets` isn't in `extra_applications` and its own header
+  comment documents why (`:httpc` would die on a missing `:http_util` under `mix run`).
+  Confirmed no `:inets`/`:httpc` reference anywhere in `lib/` or `priv/`.
+- **`mix.lock` hygiene**: no unused entries — every locked package resolves to either
+  a direct dependency or a real transitive edge (`mix deps.tree` cross-checked
+  against `mix.lock`). `mix_audit`'s transitive chain (`yaml_elixir`, `yamerl`) is
+  correctly scoped `only: [:dev, :test]` via `mix_audit` itself, so it's excluded from
+  a `MIX_ENV=prod` deps/compile pass — no dev-only leakage into prod.

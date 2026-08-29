@@ -1,130 +1,61 @@
-# Architecture Audit — live-ceci (plain OTP, no Phoenix)
+# Architecture Re-Audit — live-ceci (2026-08-29)
 
-Scope: `lib/` (10 modules, ~1060 LOC per `wc -l`) and `config/`. POC stage per project
-context; findings ranked P1 (fix before anything ships)/P2 (fix soon)/P3 (hygiene, low
-urgency).
+Scope: 13 modules (was 10 at the 2026-08-29 baseline audit, +3: `Tickets`, `Sessions`, `Redact`).
+Plain Elixir/OTP app (Bandit + Plug.Router + WebSockAdapter). No Phoenix/Ecto/Ash conventions apply.
+Confirmed fixed and NOT re-reported: the `Provider`↔`Provider.Grok` xref cycle (`mix xref cycles` → none), the `LiveSession` drift test on the `gemini_ex` internal call.
 
-## 1. Provider behaviour seam (`lib/live_ceci/provider.ex`, `provider/gemini.ex`, `provider/grok.ex`)
+## Direct answers to the five questions
 
-**Clean.** The abstraction is honest. `@callback`s (`open/1`, `send_audio/2`, `close/1`)
-cover only what is actually uniform between Gemini and Grok — session lifecycle and the
-one hot-path call. The moduledoc's reasoning for omitting `send_tool_result/3`
-(`lib/live_ceci/provider.ex:24-32`) checks out against both implementations:
+**1. Tickets vs Sessions — same module, or apart?**
+Apart is correct, but not for the reason the moduledocs give ("both are admission control"). They differ in every axis that matters for a merge: `Tickets` answers "did this address make an HTTP request first" (ETS, public, TTL, keyed by an opaque token, consumed by the *router* before upgrade); `Sessions` answers "is there a free slot right now" (GenServer state, keyed by monitoring the *socket process's own pid*, released on process death). A merge would force one data structure to serve two lifetimes (request-scoped token vs. connection-scoped slot) and two consumers (`Router` vs. `Socket`). Keep them apart. See P3 below for the one real cost of keeping them apart as-is.
 
-- `provider/gemini.ex:87-97` — `handle_tool_call/2` returns `{:tool_response, responses}`
-  as the return value of `gemini_ex`'s `on_tool_call` callback (synchronous, in-process).
-- `provider/grok.ex:166-178` — the same decision (`LiveCeci.Tools.dispatch/2`) is reached
-  via `translate/2`, but the result has to go back as *two* outbound WebSocket frames
-  (`provider/grok.ex:189-197`), sent asynchronously over the wire, not returned to a
-  caller.
+**2. `Socket.init/1` doing the cap-then-provider admission — right place, or the router's?**
+The provider-open ordering (cap before `provider.open/1`) is correct and is in the only place that can be correct — `Sessions.join/1` must run in the process that `Sessions` monitors, and that has to be the eventual socket owner. But *where in the request lifecycle* it runs is wrong. See P2 — it runs after the WebSocket upgrade (101) has already been sent to the browser, unlike the ticket/origin checks, which reject with a plain HTTP 403 before ever upgrading. Same process, same pid, avoidable inconsistency.
 
-A shared `send_tool_result/3` genuinely could not paper over that difference without a
-protocol-specific escape hatch, which would defeat the point of the seam. No finding
-here — noting only because the prompt asked for a judgment, not because there's an issue.
+**3. Is `commit_turn/1`'s Gemini no-op the same mistake as the absent `send_tool_result/3`?**
+Genuinely different, not the same mistake. `send_tool_result/3` was rejected because no single signature can honestly represent both providers' handshake (Gemini: synchronous return value from a callback; Grok: two async messages sent back over the socket) — the shapes are incompatible, so a shared function would be dead weight on one side by construction. `commit_turn/1` has one shape (`session -> :ok`) that **both** providers can implement, and Gemini's own moduledoc says outright it *could* implement manual turn-ending — it declines to, for a measured latency reason (1220 ms via its own VAD vs. 985 ms manual with added false-turn risk). That's a documented policy choice inside a shape both providers share, not an incompatible shape forced into one. No action needed.
 
-## 2. `provider.ex` <-> `provider/grok.ex` xref cycle
+**4. Coupling/cohesion across all 13 modules.**
+No cross-context reach found (no module queries another's private state; `Tools`/`Persona`/`Redact` are consumed only through their public functions; both providers call `LiveCeci.Tools.dispatch/2` and `LiveCeci.Redact.inspect/1` the same way). See P3 items for the two real but minor smells found.
 
-**P3 — cosmetic, not worth breaking.**
+**5. Is `config/runtime.exs` getting long a problem?**
+No — 132 lines, but the logic is ~35 lines; the rest is the comments this codebase consistently uses to record measured tradeoffs (frame_samples, turn_detection latencies), which is the project's established documentation style, not accidental bloat. This is the correct location for `.env`-driven runtime selection. One minor coupling worth naming: see P3 (provider defaults baked into the case branches).
 
-`mix xref graph --format cycles` reports the 2-cycle: `provider.ex` depends on
-`provider/grok.ex` (the `Application.get_env(:live_ceci, :provider, LiveCeci.Provider.Grok)`
-default at `lib/live_ceci/provider.ex:68`), and `provider/grok.ex` depends on `provider.ex`
-(`@behaviour LiveCeci.Provider` at `lib/live_ceci/provider/grok.ex:24`, plus the
-`@doc`/`@spec` reference back to the behaviour).
+---
 
-This is a compile-time edge (`mix xref graph --format stats` counts it as an outgoing
-edge from `provider.ex`, not a runtime-only reference), so Mix will recompile both
-modules together on either one's change. At 69 + 266 LOC that's free — no incremental
-build pain, no runtime cost (behaviours are checked at compile time only), and no
-dialyzer noise. The two modules are conceptually paired (the seam and its default
-implementation) so coupling them is arguably correct, not accidental. Breaking it would
-mean either (a) moving the default elsewhere, which just relocates the same knowledge, or
-(b) deferring to config with no default, which weakens `MODEL` unset behavior for no
-benefit. Leave it.
+## Issues (ranked)
 
-## 3. `LiveCeci.LiveSession` reaching into `gemini_ex` internals (`lib/live_ceci/live_session.ex`)
+### P2 — Session-cap admission rejects *after* the WebSocket upgrade instead of before it
+`lib/live_ceci/socket.ex:47-59`, `lib/live_ceci/router.ex:116-141`
 
-**P2 — real, acknowledged coupling; currently the least-bad option, but under-defended.**
+`Router`'s `get "/ws"` handler runs in the same OS/BEAM process that becomes the `WebSock` handler after `WebSockAdapter.upgrade/4` (Bandit reuses the connection process; `websock_adapter`'s own docs describe `init/1` as running "once the WebSocket connection has been successfully negotiated" — i.e., after the 101 response). `Sessions.join/1` only needs `self()`, which is identical before and after the call to `WebSockAdapter.upgrade/4`.
 
-Confirmed against `deps/gemini_ex` 0.17.0 (`deps/gemini_ex/lib/gemini/live/session.ex:237-239`):
-the public `Session.send_realtime_input/2` is exactly `GenServer.call(session,
-{:send_realtime_input, opts})` with **no timeout parameter exposed** — the 5000ms default
-is hardcoded by `GenServer.call/2`'s own default, not by gemini_ex choosing it explicitly.
-`lib/live_ceci/live_session.ex:33-37` reconstructs that same `{:send_realtime_input, opts}`
-tuple by hand to pass a 1000ms timeout instead. The message shape happens to match
-`handle_call/3` at `deps/gemini_ex/lib/gemini/live/session.ex:448` today.
+Today: origin check and ticket check reject with a plain HTTP 403 before upgrading; the session cap instead upgrades first (101 Switching Protocols sent to the browser), then immediately closes with 1013 from inside `WebSock.init/1`. This is an inconsistency between two admission checks that both exist to say "you may not connect" — one is cheap and pre-protocol-switch, the other pays for a handshake it's about to undo. It also means a full websocket negotiation (and, depending on browser, a visible "connected then immediately dropped" transition) happens for a request that was always going to be refused.
 
-Issues:
-- The module's own comment (`live_session.ex:31-32`) says this is *why* `mix.exs` pins
-  `gemini_ex` to `~> 0.17.0` — but that pin is not a real safety net. `~> 0.17.0` still
-  allows 0.17.1, 0.17.2, etc., and nothing stops a 0.17.x patch from renaming the internal
-  call tuple, changing its arity, or moving validation that currently lives in
-  `handle_call/3` (e.g. the `:ready` state guard at `session.ex:448` vs. the fallback
-  clause at `session.ex:461`) — a patch-level release is exactly where an internal
-  message shape is allowed to change under semver. There is no test in this codebase (or
-  possible to write) that would catch that at compile time; it fails silently as a
-  changed `:error` term or a swallowed timeout.
-- No comment/test documents *what breaks* if this drifts — only that it's fragile. Given
-  the moduledoc already correctly identifies the exit-signal hazard as the reason this
-  exists, the missing piece is a cheap tripwire: a test that asserts
-  `Gemini.Live.Session` still exports whatever internal contract is being relied on (or at
-  minimum, pin the dependency with an exact version `"== 0.17.0"` rather than `~>`, since
-  the stated rationale — "one internal message" — only holds for the exact version
-  inspected).
+Fix: call `LiveCeci.Sessions.join(conn.remote_ip)` in `Router`'s `get "/ws"` clause (after the ticket/origin checks, before `WebSockAdapter.upgrade/4`), and drop the `Sessions.join` call from `Socket.init/1`. `Process.monitor(self())`'s target pid is unaffected by the call site.
 
-Given the POC framing this is acceptable to ship as-is, but it should not survive to
-production without either (a) upstreaming a `timeout` argument to `gemini_ex` publicly, or
-(b) tightening the version pin to match what the comment claims.
+### P3 — `Tickets` and `Sessions` are conceptually paired gatekeepers with no shared vocabulary
+`lib/live_ceci/tickets.ex`, `lib/live_ceci/sessions.ex`
 
-## 4. Tool dispatch inside each provider vs. the socket
+Both exist to answer "who may reach `/ws`", both are read by `Router`/`Socket` right at the admission boundary, both log a `Logger.warning` on refusal in the same style, both read their limits from `Application.get_env(:live_ceci, ...)`. Nothing forces a merge (question 1), but nothing in the naming (`LiveCeci.Tickets`, `LiveCeci.Sessions`, both top-level, siblings of `Persona`/`Tools`) signals that they're a matched pair rather than two unrelated concerns. A future reader has to read both moduledocs in full to learn they compose. Low cost today at 2 modules; worth a namespace (`LiveCeci.Admission.Tickets` / `.Sessions`) or at minimum a cross-reference in each moduledoc if a third admission mechanism is ever added.
 
-**Clean, same reasoning as #1.** `lib/live_ceci/tools.ex` centralizes the actual decision
-(`dispatch/2`), and each provider only owns the protocol-specific handshake around it —
-`provider/gemini.ex:88-97` calls it inline inside a synchronous callback,
-`provider/grok.ex:166-178` calls it inline inside `handle_frame`/`translate`. Moving
-dispatch to the socket process would add a hop with no payoff (`socket.ex` never touches
-tool args today) and, per the Gemini path, isn't possible anyway — the return value has
-to come from the same process the callback runs on. No finding.
+### P3 — Provider defaults hardcoded into `config/runtime.exs`'s branch, duplicating provider selection knowledge
+`config/runtime.exs:64-74`
 
-## 5. Module boundaries generally
+`LiveCeci.Provider.current/0`'s moduledoc explicitly rejects naming a specific provider module inside `lib/live_ceci/provider.ex` ("a seam that names a specific backend is the kind of wrong that stops being free the day a third provider arrives"), and moved that decision to config for exactly that reason. But `config/runtime.exs` still hardcodes `LiveCeci.Provider.Gemini` / `LiveCeci.Provider.Grok` alongside each one's default model/voice string, in a `case` keyed on `MODEL`. Adding a third provider means editing this file's branch (fine, it's config) *and* knowing that model/voice defaults belong there rather than in the provider module itself — there's no `Gemini.default_model/0` counterpart to own that knowledge. Not a boundary violation (config selecting between backends is the right layer per the moduledoc's own argument), but the per-provider defaults living in a shared file rather than each provider module is one more place a third provider's addition has to touch, and one more thing the config file has to know about a provider's internals. Low priority; only worth doing if/when a third provider is added.
 
-**Mostly clean.** One dependency-declaration finding:
+### P3 — `LiveCeci.Provider.Grok` is the largest module and closest to a "does everything for one provider" shape
+`lib/live_ceci/provider/grok.ex` (342 lines, vs. `Gemini` at 187)
 
-- **P3** — `mix.exs:30` declares `{:websockex, "~> 0.4"}` while `mix.lock` resolves
-  `0.5.1` (forced by `gemini_ex`'s own tighter `{:websockex, "~> 0.5.1"}`).
+Not yet a god-module (no 400-line threshold crossed, and the length is wire-protocol translation + measured-tradeoff comments consistent with the rest of the codebase), but it's the one module to watch: if Grok's JSON event protocol grows another few event types, this is where a split (e.g., extracting message encoding/decoding from the `WebSockex` callback module) would pay off before it's needed rather than after.
 
-  > **Correction, applied by the orchestrator after verification.** This finding
-  > originally claimed `"~> 0.4"` means `>= 0.4.0 and < 0.5.0` and therefore does not
-  > permit the locked `0.5.1`. That is wrong. `~> MAJOR.MINOR` on a two-segment
-  > requirement means `>= 0.4.0 and < 1.0.0`; only a three-segment `~> 0.4.1` would stop
-  > at `< 0.5.0`. Checked directly: `Version.match?("0.5.1", "~> 0.4")` returns `true`.
-  > There is no conflict between `mix.exs` and `mix.lock`.
+---
 
-  What survives is the weaker, real point, which `deps-audit.md` states correctly: the
-  constraint is LOOSE for a pre-1.0 package. `"~> 0.4"` admits the whole `0.x` line up to
-  `1.0.0`, and this app depends on `WebSockex.send_frame/3`'s timeout argument
-  (`provider/grok.ex:276`). Today only `gemini_ex`'s tighter requirement keeps the
-  resolution on `0.5.x`; if that dependency were removed or loosened, `mix deps.get`
-  could legitimately resolve back to `0.4.x`. Fix: declare `"~> 0.5.1"` so the file
-  states its own requirement rather than relying on a transitive one.
-
-No other boundary issues: `LiveCeci.Tools`, `LiveCeci.Persona`, `LiveCeci.Router`,
-`LiveCeci.Application` each own one concern, none reach into another's private state,
-and `LiveCeci.Socket` (`lib/live_ceci/socket.ex`) only calls the `Provider` behaviour
-contract — it never pattern-matches on `Gemini.*` or Grok-specific structures itself
-(that logic correctly stays inside each provider module, per the moduledoc at
-`socket.ex:11-16`).
-
-## Summary of findings
+## Summary of ranked findings
 
 | # | Severity | Location | Issue |
 |---|----------|----------|-------|
-| 3 | P2 | `lib/live_ceci/live_session.ex:33-37`, `mix.exs:36` | Reimplements gemini_ex's internal `{:send_realtime_input, opts}` GenServer.call to get a custom timeout; `~> 0.17.0` pin doesn't actually prevent the patch-level drift the code's own comment worries about |
-| 5 | P3 | `mix.exs:30` | `websockex "~> 0.4"` declared but `0.5.1` is what's locked/used and required by `gemini_ex`; the app's own constraint doesn't reflect the API it calls |
-| 2 | P3 | `provider.ex:68` <-> `provider/grok.ex:24` | 2-node xref cycle; compile-time coupling between the seam and its default backend — harmless at this size, not worth restructuring |
-
-Areas checked with nothing to report: Provider behaviour honesty (#1), tool dispatch
-placement (#4), general module cohesion (#5 beyond the dep-constraint issue), Socket's
-process/supervision model (one-process-per-connection, `trap_exit`, no bare receive
-loop), and config/runtime.exs (no secrets logged, MODEL branch has independent defaults
-per provider as documented).
+| 1 | P2 | `socket.ex:47`, `router.ex:116` | Session-cap admission happens after the WS upgrade (101) instead of before it, unlike the ticket/origin checks |
+| 2 | P3 | `tickets.ex`, `sessions.ex` | Paired admission gatekeepers with no shared namespace/vocabulary |
+| 3 | P3 | `config/runtime.exs:64-74` | Per-provider default model/voice hardcoded in config rather than owned by each provider module |
+| 4 | P3 | `provider/grok.ex` | Largest module (342 lines); watch for a split if the Grok event protocol grows further |
