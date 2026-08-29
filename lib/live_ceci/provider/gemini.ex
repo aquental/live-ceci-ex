@@ -15,6 +15,8 @@ defmodule LiveCeci.Provider.Gemini do
 
   @behaviour LiveCeci.Provider
 
+  require Logger
+
   alias Gemini.Live.{Audio, Session}
   alias Gemini.Types.Live.{ServerContent, ServerMessage, ToolCall}
 
@@ -96,7 +98,12 @@ defmodule LiveCeci.Provider.Gemini do
     {:tool_response, responses}
   end
 
-  def handle_tool_call(_tool_call, _owner), do: :ok
+  # Same again: a ToolCall whose shape changed would drop every tool the model asks for,
+  # and she would keep talking as if nothing had happened.
+  def handle_tool_call(other, _owner) do
+    Logger.warning("gemini: unrecognised tool call #{inspect(other, limit: 3)}")
+    :ok
+  end
 
   # ------------------------------------------------------------------ private
 
@@ -111,8 +118,19 @@ defmodule LiveCeci.Provider.Gemini do
     :ok
   end
 
+  # A ServerMessage with no server_content is routine — setup acks, resumption updates.
+  # Silence is correct here.
   def translate(%ServerMessage{}, _owner), do: :ok
-  def translate(_other, _owner), do: :ok
+
+  # Anything that is not a ServerMessage at all is NOT routine. mix.exs pins gemini_ex to
+  # the minor and the comment there says drift "surfaces as a runtime error, not a compile
+  # one" — which was not true of this clause. It matched everything and returned :ok, so a
+  # changed struct shape would have taken her voice away with no crash, no log, and a
+  # green test suite. The pin does not protect a catch-all; a log does.
+  def translate(other, _owner) do
+    Logger.warning("gemini: unrecognised server message #{inspect(other, limit: 3)}")
+    :ok
+  end
 
   @doc false
   def translate_transcript({role, %{"text" => text}}, owner)
@@ -121,7 +139,15 @@ defmodule LiveCeci.Provider.Gemini do
     :ok
   end
 
-  def translate_transcript(_other, _owner), do: :ok
+  # An empty or missing text is routine — the API sends those between fragments.
+  def translate_transcript({_role, %{"text" => _}}, _owner), do: :ok
+
+  # A different shape is drift, and would silently delete every transcript. Same reasoning
+  # as translate/2 above.
+  def translate_transcript(other, _owner) do
+    Logger.warning("gemini: unrecognised transcript #{inspect(other, limit: 3)}")
+    :ok
+  end
 
   defp parts(%ServerContent{model_turn: %{parts: parts}}) when is_list(parts), do: parts
   defp parts(_sc), do: []
