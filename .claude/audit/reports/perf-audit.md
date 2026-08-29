@@ -1,116 +1,215 @@
-# Performance Re-Audit — live-ceci (latency & backpressure on the voice hot path)
+# Performance Audit — live-ceci (memory, backpressure, unbounded growth)
 
-Scope: `lib/`, `priv/frontend/`. Thirty commits after the 2026-08-29 baseline audit
-(80/B). Plain OTP app, no Ecto/DB — not checked, not repeated below.
+Scope: `lib/live_ceci/socket.ex`, `lib/live_ceci/live_session.ex`,
+`lib/live_ceci/provider/{gemini,grok}.ex`, `lib/live_ceci/sessions.ex`,
+`lib/live_ceci/tickets.ex`, `lib/live_ceci/application.ex`, `lib/live_ceci/router.ex`,
+`priv/frontend/{main,pcm-processor}.js`. Plain OTP app, no Ecto/DB/Phoenix — not
+applicable, not repeated below.
 
-Baseline for context: 985 ms (xAI, manual turn detection) / 1220 ms (Gemini, server
-VAD) utterance-end to first-voice-byte, provider-dominated. Findings below are
-ranked by avoidable latency/growth our own code adds on top of that.
-
-Re-verified as genuinely fixed, not re-reported: Bandit `send_timeout: 5_000`
-(`application.ex:27`); voice-frame shedding past 40 queued messages
-(`socket.ex:140-152`); Grok's `send_audio` as a `WebSockex.cast`
-(`provider/grok.ex:98`); the worklet's preallocated `Float32Array` + one-pass clip/RMS
-(`pcm-processor.js:40,56-72`); `ws.bufferedAmount` guard + bounded `activeSources`
-(`main.js:80-82,173-176`); `Tools.dispatch`'s flat `binary_part` truncation
-(`tools.ex:243-252`). Also newly confirmed fixed since the last report, though not on
-the "already fixed" list: `Gemini.close/1` is now guarded with a 1 s
-`Task.await`/`catch :exit` (`provider/gemini.ex:91-105`), closing P3-#6 from the prior
-report.
+Not re-derived (given, trusted as measured): per-100ms-frame reduction/latency costs
+through `Socket`, `LiveSession`, `Grok.send_audio`, `Base.encode64` (Gemini-only, inside
+gemini_ex, not `create_input_blob`), `Tools.dispatch` flatness, `Tickets.issue` ~17µs,
+`Sessions.join` p95 1µs/max 6µs, and the ~985ms/1220ms provider-dominated end-to-end
+latency. This report supersedes the prior `perf-audit.md`, whose headline P1 (Gemini's
+mic path blocking the socket process) is now fixed: `lib/live_ceci/live_session.ex`
+did not exist at that audit and now carries the blocking Gemini call off the socket
+process entirely — confirmed fixed, not re-reported.
 
 ---
 
 ## P1
 
-### 1. Gemini's mic path is still the synchronous half of the bug that was fixed for Grok
-`socket.ex:104` (`handle_in`) calls `provider.send_audio/2` on the one process that
-also owns downstream `handle_info`/`{:push, ...}` (`socket.ex:143-151`). For Grok this
-is now `WebSockex.cast/2` — fixed, fire-and-forget (`provider/grok.ex:98`). For
-Gemini it still resolves to `live_session.ex:33-37`:
-`GenServer.call(session, {:send_realtime_input, ...}, 1_000)` — a **blocking** call,
-unchanged since before the baseline audit, called once per ~100 ms mic frame (~10/sec).
+### 1. `activeSources`'s overflow guard is dead code — the browser tab's real memory bound on a long call does not exist
+`priv/frontend/main.js:80-87`:
+```js
+if (activeSources.length > MAX_SOURCES) {
+  activeSources = activeSources.filter((s) => s.__done !== true);
+}
+src.onended = () => {
+  src.__done = true;
+  activeSources = activeSources.filter((s) => s !== src);
+  ...
+};
+```
+`__done` is only ever set to `true` *inside* `onended`, and the same synchronous
+callback that sets it also removes that element from `activeSources` in the same
+tick (`s !== src`). There is no code path that leaves an element in the array with
+`__done === true`. So the filter at line 81 — the comment above it calls it a "sweep"
+against exactly the case where `onended` doesn't fire — can never remove anything: any
+element still in the array by definition has `__done !== true` already. `MAX_SOURCES`
+(300, `main.js:14`) is checked but never enforced.
 
-This is the exact shape the prior audit's P1-#1 described for *both* providers; only
-the Grok half was fixed (`63d9b77`). Consequence, unchanged from before: while the
-call is in flight, `handle_info` cannot run, so any voice/transcript/action frame
-already queued for the browser waits behind it. A single slow Gemini ACK adds up to
-1 s of jitter to outbound voice — comparable to the entire 1220 ms measured budget —
-on every mic frame, not just the one that stalled. `MODEL=GOOGLE` remains a fully
-supported, documented backend (`config/runtime.exs:65-70`, latency comment at
-`provider/gemini.ex:85-88`), so this isn't dead code — it's live exposure for anyone
-running the Gemini path.
+Consequence: the moduledoc-adjacent comment (`main.js:76-79`) names the real failure
+modes itself — "a suspended context, a tab in the background, or a source stopped in
+a way the browser does not report" — and in every one of them, `activeSources` grows
+by one `AudioBufferSourceNode` + one already-decoded `AudioBuffer` (24 kHz Float32,
+~9.6 KB per 100 ms chunk at typical provider chunking) per voice frame, for the rest
+of the call, with nothing capping it. A backgrounded tab during an hour-long call —
+not a corner case for a voice assistant meant to run in a browser tab — accumulates
+roughly 36,000 sources/buffers at 10 frames/sec, ~345 MB of raw PCM float data alone
+before per-object overhead, and the tab either OOMs or the audio graph degrades long
+before the user notices anything else wrong.
 
-Compounding factor: when this call times out (or Gemini answers `{:error, reason}`
-some other way), `socket.ex:109` logs `Redact.inspect(reason)` — `Kernel.inspect` plus
-4 regexes plus N `String.replace` passes — **on the same hot path**, once per failed
-frame. `Redact` is correctly off the hot path in the steady state (confirmed: every
-other call site is init/close/error/unhandled-message, none per-frame), but a
-degraded Gemini upstream turns "off the hot path" into "10×/sec," adding CPU work
-exactly when the system is already behind.
+Fix shape: either make the filter correct (track `Date.now()` per source and evict by
+age past its expected `duration`, since `__done` genuinely cannot do this job), or move
 
-Fix shape: mirror the Grok fix — hand the frame to a process WebSockex-style, or at
-minimum move the send off the socket process (e.g., `Task.start` fire-and-forget per
-frame is wrong for ordering; a small per-session forwarder process akin to what
-`WebSockex` already gives Grok for free is the closer match).
+> **RETRACTED by the orchestrator after verification.** The finding below claims
+> `WebSockex.start_link` has no connect timeout and defaults to `:infinity`, citing
+> `deps/websockex/lib/websockex/utils.ex:31`. That line is `do_spawn(:link, args)`
+> calling `:proc_lib.start_link/3` — there is no `:infinity` there and no timeout at all.
+>
+> WebSockex does bound both halves of the handshake:
+> `deps/websockex/lib/websockex/conn.ex:10-11` sets
+> `@socket_connect_timeout_default 6000` and `@socket_recv_timeout_default 5000`, wired
+> into the `%Conn{}` defaults at lines 21-22. Worst case a stalled connect to xAI holds a
+> Sessions slot for about 11 seconds, not indefinitely, and the slot is released when the
+> socket process dies either way.
+>
+> The finding is left in place rather than deleted so the reasoning that produced it can
+> be checked, not repeated.
+
+
+to `AudioBufferSourceNode.addEventListener` + an explicit epoch counter that doesn't
+depend on `onended` firing at all.
+
+### 2. `Grok.open/1`'s `WebSockex.start_link` has no connect timeout — a stalled upstream handshake hangs the WS upgrade forever, not just the reconnect
+`lib/live_ceci/provider/grok.ex:56-58`:
+```elixir
+case WebSockex.start_link(url, __MODULE__, %{owner: owner},
+       extra_headers: [{"Authorization", "Bearer " <> key}]
+     ) do
+```
+No `:timeout` option. `WebSockex.start_link/4` → `Utils.spawn/5` →
+`:proc_lib.start_link(WebSockex, :init, args)` (`deps/websockex/lib/websockex/utils.ex:31`)
+with no timeout argument, which defaults to `:infinity` — the TCP+TLS connect to
+`wss://api.x.ai/v1/realtime` can hang indefinitely on a black-holed SYN or a stalled
+TLS handshake. This runs inside `LiveCeci.Socket.init/1` (`socket.ex:75-93`), which
+runs *inside* Bandit's `handle_connection` (`deps/bandit/lib/bandit/websocket/handler.ex:28`)
+— and confirmed by reading that file: the `timeout:` option passed to
+`WebSockAdapter.upgrade/4` (`router.ex:143`, `60_000`) is only installed as a
+`{:persistent, timeout}` idle timer **after** `Connection.init/4` (which runs our
+`Socket.init/1`) returns (`handler.ex:28-33`). There is no framework-level bound on
+`init/1` itself.
+
+Consequence: `LiveCeci.Sessions.join/1` (`socket.ex:47`) already succeeded and holds a
+slot before `open_session/0` calls `Grok.open/1` — so a hung connect attempt pins one
+of the default 4 per-address slots (`max_sessions_per_address`, `sessions.ex:161`) for
+however long the OS-level TCP connect takes to give up (often 60–130s on a black-holed
+SYN on Linux, or truly forever if the remote accepts the TCP connection but never
+completes TLS/HTTP). A user "hitting reconnect repeatedly" against a flaky network path
+to xAI can pin all 4 per-address slots within a handful of attempts and lock themselves
+out with 1013 refusals until the OS eventually gives up — self-inflicted denial of
+service, and indistinguishable from the server actually being at capacity. Contrast
+with `close/1` (`@close_timeout 1_000`, `grok.ex:33`) and `send_json/2`
+(`@send_timeout 1_000`, `grok.ex:361`), which are both explicitly bounded — the connect
+step is the one gap. `Gemini.open/1` does not have this gap: `Session.connect/1` is a
+`GenServer.call(session, :connect, 30_000)` — bounded, if 30x looser than the other
+budgets in this codebase.
+
+Fix shape: pass `:timeout` in the `opts` given to `WebSockex.start_link/4` (a few
+seconds, matching `@send_timeout`/`@close_timeout`'s existing 1_000 discipline), and
+release the Sessions slot on that path exactly like the existing
+`{:error, reason} -> close(ws); {:error, reason}` branch already does for a failed
+`send_json`.
 
 ---
 
 ## P2
 
-None. Everything else inspected for the re-audit (below) is bounded at realistic
-scale and off the per-frame path.
+### 3. Per-session provider processes are held together by links alone, with no independent count
+Confirmed process shape per session: `Grok` = Bandit connection process (the socket) +
+one `WebSockex` process. `Gemini` = Bandit connection process + one
+`Gemini.Live.Session` (gemini_ex) + one `LiveCeci.LiveSession` carrier. Confirmed
+correct today: neither `WebSockex` (no `trap_exit` anywhere in
+`deps/websockex/lib/websockex.ex`) nor `Gemini.Live.Session`
+(no `trap_exit` in `deps/gemini_ex/lib/gemini/live/session.ex`) traps exits, and both
+are `start_link`'d from inside the socket process, so a socket crash correctly cascades
+to kill its provider process(es), and a provider crash correctly reaches the socket via
+`Process.flag(:trap_exit, true)` (`socket.ex:64`) → the `{:EXIT, pid, reason}` clause
+(`socket.ex:177-180`).
+
+What's missing: none of these processes sit under a `Supervisor`, and
+`LiveCeci.Sessions.total/0` (`sessions.ex:88-89`) only counts *socket* pids, never
+provider/carrier pids. `application.ex:12-29` supervises only `Tickets`, `Sessions`,
+and the `Bandit` listener. There is no independent accounting that would notice a
+provider process outliving its socket. This is not hypothetical here: `Gemini.ex`'s
+own moduledoc documents *two* historical instances of exactly this leak
+(`provider/gemini.ex:38-44` — `open/1` dropping `session` on a failed `connect`, leaked
+because the Sessions slot is keyed to the socket pid, not the upstream session;
+`provider/gemini.ex:65-70` — `Session.close/1` stopping the websocket but leaving the
+GenServer running) — both since patched, per the moduledoc's own account, by code
+review rather than by any structural safety net. A third such bug, in either provider
+module, would again leak invisibly: `Sessions.total/0` would still report the correct
+socket count while a provider process sits there billed and un-tracked, and nothing in
+this codebase would surface it besides log volume, if that.
+
+### 4. `Sessions`/`Tickets` are not the bottleneck at 8 or 100 concurrent sessions — the real ceiling is external
+Modeled explicitly, since the audit asked: `Sessions.join/1` is a `GenServer.call` at
+connection-open only (once per socket lifetime, never per frame), already measured at
+p95 1µs / max 6µs. `count_for/2` (`sessions.ex:153-155`) is `Enum.count/2` over the
+holders map, `O(map_size(holders))` — at the default cap of 8 that's noise; at the
+configurable ceiling of 100 (or the code's actual allowed range, 1..1000 per
+`env_int` in `config/runtime.exs`) it is still a single-digit-microsecond linear scan.
+`Tickets.issue/1`/`consume/2` run in the *caller's* process against a `:public,
+read_concurrency: true` ETS table (`tickets.ex:181`) — genuinely concurrent, no
+GenServer round trip at all for the hot path of minting/spending a ticket. Neither
+module serializes anything that scales with session count in a way that matters at
+either 8 or 100.
+
+Two minor, real costs found while modeling it: `router.ex:132` (`Sessions.available?`)
+and `socket.ex:47` (`Sessions.join`) are two sequential `GenServer.call`s to the same
+singleton per successful connection, not one — ~2×(1–6µs), harmless in isolation but
+doubling the serialized load on the one process gating every connection in the system,
+worth remembering if `MAX_SESSIONS` and reconnect frequency both grow well past today's
+defaults.
+
+The actual first thing that breaks at 100 concurrent sessions is not in this codebase:
+each session holds 2 open sockets (1 browser, 1 upstream) and 2–3 BEAM processes, so
+100 sessions ≈ 200 sockets / ~250–300 processes — trivial for the VM, but worth
+confirming against the deployment's `ulimit -n` before raising `MAX_SESSIONS` toward
+1000. Far more likely to bind first: 100 simultaneous Live-API WebSocket sessions
+against a single xAI or Gemini API key hitting that provider's own concurrent-session
+or QPS ceiling — nothing in this codebase measures or tests that, so `provider.open/1`
+would start returning `{:error, reason}` at whatever the provider's real limit is, with
+no distinguishing signal to the operator beyond a generic connect failure log. Anyone
+raising `MAX_SESSIONS` past single digits should verify the account tier first; this
+code has nothing to say about it either way.
 
 ---
 
-## P3 — verified, no action needed at current scale
+## P3
 
-### 2. `Sessions.join/1` — not a bottleneck, but worth the paper trail
-`sessions.ex:64-82` is a `GenServer.call` per WebSocket **upgrade**, not per frame —
-nowhere near the ~10 fps audio path. `count_for/2` (`sessions.ex:94-96`,
-`Enum.count/2` over the holders map) runs at `map_size(holders) <= max_total()`,
-default 8, configurable up to 1000 (`config/runtime.exs:124`). Even at 1000 this is a
-single-digit-microsecond linear scan; at the default cap of 8 it's noise. The
-`handle_call` body does pure map ops plus a deferred (level-gated) `Logger.warning`
-on refusal — no I/O, so it essentially cannot block. If it somehow did: the call has
-no explicit timeout, so a wedged `Sessions` process would stall *new* connection
-attempts for up to the default 5 s before failing — existing audio streams are
-unaffected, since `join/1` runs once at `init/1` and never again per socket. No fix
-needed at current scale; flag only if `MAX_SESSIONS` is ever pushed toward the high
-end of its configured range in a deployment that also expects fast reconnect storms.
+### 5. `MAX_SOURCES` is the only bound in this list that isn't just conservative — it doesn't bind anything
+Reviewing every bound named: `@max_queued 20` (`live_session.ex:42`, `grok.ex:84`) ≈ 2s
+of mic audio at 10 fps before dropping — reasoned, holds. `@max_queued 40`
+(`socket.ex:140`) downstream, double the upstream bound to absorb bursts from
+providers that don't pace audio in real time — reasoned, holds. `MAX_BUFFERED 32000`
+(`main.js:12`) ≈ 1s of 16kHz s16 mono — matches its own comment, holds. `@max_outstanding
+200` / `@max_per_address 20` (`tickets.ex:61,67`) are deliberately generous relative to
+`max_sessions 8` because tickets are cheap and Sessions is the real gate — by design,
+holds. `max_sessions 8` / `max_sessions_per_address 4` (`sessions.ex:157,161`) — sane
+defaults for loopback. `MAX_SOURCES 300` (`main.js:14`) is the outlier: it is not too
+tight or too loose, it simply never fires, per finding #1 — a bound that exists in the
+source but not in the running program.
 
-### 3. `Tickets.issue/1` sweeping the whole table on every mint — cheap at the configured cap
-`tickets.ex:60-71` calls `sweep/0` (`tickets.ex:102-105`, `:ets.select_delete/2` over
-the full table) on every ticket mint, bounded by `@max_outstanding` 200
-(`tickets.ex:46`). A full-table `select_delete` at n≤200 is sub-millisecond and this
-runs on the `/ws-ticket` HTTP path — once per connection **setup**, never per audio
-frame. Not a latency risk for the voice path. One real edge case: the table is
-`:public, :set` without `write_concurrency: true` (`tickets.ex:117`), so many
-simultaneous `/ws-ticket` POSTs (e.g., a reconnect storm after a network blip) serialize
-on ETS's table-wide write lock across `select_delete` + `insert`. At n≤200 this is
-still fast, but `write_concurrency: true` is a one-line defensive change if reconnect
-storms become a realistic scenario.
+### 6. No growth found in gemini_ex's per-session state over a long call
+Checked specifically because the audit asked about accumulation over an hour:
+`Gemini.Live.Session`'s `usage_metadata` is *replaced*, not appended
+(`deps/gemini_ex/lib/gemini/live/session.ex:766`: `usage || state.usage_metadata`), and
+the rest of its state (`websocket`, `status`, `config`, `session_handle`) is fixed-size
+and doesn't grow with conversation length. `LiveCeci.LiveSession`'s own state
+(`%{session: session, dropped: count}`, `live_session.ex:65`) is a pid and a bare
+integer counter — no per-frame accumulation. No transcript, history, or PCM buffer is
+held server-side anywhere in this codebase; every frame is decoded, forwarded, and
+dropped from the mailbox on delivery.
 
-### 4. `router.origin_allowed?/1` calling `LiveCeci.config()` — confirmed off the hot path, and mostly skipped
-`router.ex:60-68`: `LiveCeci.config()` is only reached via the right-hand side of
-`host in @loopback_hosts or origin in LiveCeci.config().allowed_origins` — Elixir's
-`or` short-circuits, so on a loopback-bound deployment (the documented default) the
-`Application.get_env` calls never run at all. Even when they do run, it's once per
-`/ws` upgrade or `/ws-ticket` POST — connection setup, not per frame. No issue.
-
-### 5. `pcm-processor.js` end-of-speech detection — cheap additions, no new allocations
-`pcm-processor.js:75-91`: the added manual-turn-detection logic (rising/falling edge
-tracking, `_below`/`_openFor` counters, two threshold comparisons) reuses the RMS
-already computed for barge-in in the existing one-pass loop (`:66-72`). Every added
-operation per render quantum (~375/sec) is O(1) integer/float arithmetic — no new
-array or object allocation on the audio thread. `_endTurn`/`_flush`
-(`:93-107`) only allocate (`frame.slice`, `postMessage` payload objects) on
-utterance boundaries (~10/sec or less), not per quantum. No issue.
-
-### 6. Default 5 s `GenServer.call` timeouts on `Sessions`/`Tickets` — inconsistent with the rest of the codebase's discipline, low severity
-Every call on the audio hot path in this codebase is explicitly timeout-guarded
-(`live_session.ex:36`, `grok.ex:338`, `gemini.ex:99`) specifically because a default
-5 s `GenServer.call` timeout raises an exit in the caller. `Sessions.join/1`
-(`sessions.ex:48`) and `Tickets.issue/consume` (ETS-based, not a call, so N/A) don't
-carry that guard — but `join/1` is off the per-frame path (see #2), so the blast
-radius if it ever fires is a slow connection *attempt*, not a stalled audio stream.
-Noted for consistency, not urgent.
+### 7. Startup/reconnect cost is bounded everywhere except the one gap in #2
+End-to-end open cost, walked step by step: ticket mint (~17µs, ETS, given) → cap check
+(`Sessions.available?` + `Sessions.join`, ~2×1–6µs, see #4) → provider open (network-
+bound, provider-dominated) → `session.update`/setup (Gemini: `Session.connect`
+bounded at 30_000ms; Grok: `send_json` bounded at `@send_timeout 1_000`). Every step
+our code controls is either microsecond-scale or explicitly timeout-guarded, with the
+sole exception of Grok's initial `WebSockex.start_link` (P1 #2). A user mashing
+reconnect against a *healthy* upstream pays only real provider RTT each time (the
+~985ms/1220ms budget already measured) — the reconnect-storm risk is specifically the
+degraded-network case covered above, not the happy path.

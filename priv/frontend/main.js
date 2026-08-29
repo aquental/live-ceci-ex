@@ -72,16 +72,29 @@ function playVoice(buf) {
   const now = audioCtx.currentTime;
   if (nextStart < now) nextStart = now;
   src.start(nextStart); nextStart += ab.duration;
+  // When this buffer is scheduled to finish. The sweep below needs a fact the browser
+  // cannot withhold, and this is it.
+  src.__endsAt = nextStart;
   activeSources.push(src);
+
   // onended is the only thing that empties this list, and it is not guaranteed: a
-  // suspended context, a tab in the background, or a source stopped in a way the browser
-  // does not report leaves entries behind forever. Sweep anything already finished, so a
-  // long call cannot accumulate them.
+  // suspended context, a backgrounded tab, or a source stopped in a way the browser does
+  // not report leaves entries behind forever.
+  //
+  // The first version of this guard swept entries flagged __done — which onended set
+  // immediately before removing the entry itself, in the same callback. Nothing flagged
+  // was ever still in the array, so the filter could never match and MAX_SOURCES was
+  // checked but never enforced: a bound that cannot fire, which is worse than none,
+  // because it reads as protection. An audit caught it.
+  //
+  // Scheduled end time against currentTime is the honest test. A source whose audio is
+  // already in the past is finished whether or not the browser said so.
   if (activeSources.length > MAX_SOURCES) {
-    activeSources = activeSources.filter((s) => s.__done !== true);
+    const now = audioCtx.currentTime;
+    activeSources = activeSources.filter((s) => s.__endsAt > now);
   }
+
   src.onended = () => {
-    src.__done = true;
     activeSources = activeSources.filter((s) => s !== src);
     if (!activeSources.length) { speaking = false; setOrb("listening"); }
   };
