@@ -95,11 +95,34 @@ defmodule LiveCeci.RedactTest do
       # The guard that matters more than any single case above: this module only helps at
       # the places that call it, and the leak was seven `inspect(reason)` sites in one
       # file. A new one compiles clean and says nothing until a key is in a log.
+      # Scoped to Logger lines, and deliberately NOT to variable names.
+      #
+      # The first version matched three names (reason, msg, other), which the re-audit
+      # rightly called too narrow. Widening it to every bare inspect/1 in lib/ was worse:
+      # it flagged four files and not one was a leak — Redact's own `def inspect`, a
+      # module name, a request header, an .env value. A guard that cries wolf gets
+      # deleted rather than fixed, which is the lesson the "no lingering mira" grep
+      # already taught in this codebase.
+      #
+      # So the rule is a shape, not a vocabulary: a Logger call may not inspect anything
+      # itself. That is followable without judgement, and it is why router.ex and
+      # socket.ex now route even module names and headers through Redact — uniform costs
+      # nothing, since Redact leaves anything that is not a credential alone.
+      #
+      # What it still cannot see is the two-step form: build a string, log it later.
+      # No textual rule catches that one, and pretending otherwise would be worse than
+      # saying so here.
       offenders =
         "lib/**/*.ex"
         |> Path.wildcard()
         |> Enum.filter(fn path ->
-          File.read!(path) =~ ~r/Logger\.\w+\([^)]*[^.]\binspect\((reason|msg|other)\b/
+          path
+          |> File.read!()
+          |> String.split("\n")
+          |> Enum.any?(fn line ->
+            String.contains?(line, "Logger.") and
+              Regex.match?(~r/(?<![.\w])inspect\(/, line)
+          end)
         end)
 
       assert offenders == [],

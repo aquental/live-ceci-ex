@@ -1,6 +1,8 @@
 defmodule LiveCeci.LiveSessionTest do
   use ExUnit.Case, async: true
 
+  import LiveCeci.Eventually
+
   alias LiveCeci.LiveSession
 
   # A stand-in for Gemini.Live.Session: answers the same call message, or never answers.
@@ -77,14 +79,6 @@ defmodule LiveCeci.LiveSessionTest do
                queued <= 40
              end),
              "the carrier mailbox grew past the bound"
-    end
-  end
-
-  defp eventually(check, remaining \\ 1_000) do
-    cond do
-      check.() -> true
-      remaining <= 0 -> false
-      true -> Process.sleep(10) && eventually(check, remaining - 10)
     end
   end
 

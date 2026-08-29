@@ -2,6 +2,8 @@ defmodule LiveCeci.ApplicationTest do
   # async: false — reads the running application's own supervision tree.
   use ExUnit.Case, async: false
 
+  import LiveCeci.Eventually
+
   # The supervisor is started by the test VM itself, so this asserts against what is
   # actually running rather than re-starting anything. It was the only module in lib/
   # with no test at all, and the things it decides — where the listener binds, how long
@@ -42,13 +44,5 @@ defmodule LiveCeci.ApplicationTest do
                  false
              end
            end)
-  end
-
-  defp eventually(check, remaining \\ 1_000) do
-    cond do
-      check.() -> true
-      remaining <= 0 -> false
-      true -> Process.sleep(10) && eventually(check, remaining - 10)
-    end
   end
 end

@@ -11,6 +11,8 @@ defmodule LiveCeci.Provider.GrokTest do
   """
   use ExUnit.Case, async: true
 
+  import LiveCeci.Eventually
+
   alias LiveCeci.Provider.Grok
 
   @pcm <<1, 0, 2, 0, 3, 0, 255, 127>>
@@ -265,16 +267,6 @@ defmodule LiveCeci.Provider.GrokTest do
       assert Grok.session_update(voice: "luna", language: "pt-BR")
              |> Jason.encode!()
              |> Jason.decode!()
-    end
-  end
-
-  # Retries a condition until it holds or the budget runs out, instead of sleeping for a
-  # duration somebody guessed. Fast when it passes, and it fails with a real message.
-  defp eventually(check, remaining \\ 1_000) do
-    cond do
-      check.() -> true
-      remaining <= 0 -> false
-      true -> Process.sleep(10) && eventually(check, remaining - 10)
     end
   end
 

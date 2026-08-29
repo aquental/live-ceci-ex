@@ -67,7 +67,7 @@ defmodule LiveCeci.Socket do
     provider = Provider.current()
 
     Logger.info(
-      "ws connected; opening #{inspect(provider)} session " <>
+      "ws connected; opening #{Redact.inspect(provider)} session " <>
         "(model=#{config.model}, voice=#{config.voice}, language=#{config.language}, " <>
         "silence=#{config.silence_duration_ms}ms, turns=#{config.turn_detection})"
     )

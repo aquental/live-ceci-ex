@@ -2,6 +2,8 @@ defmodule LiveCeci.SessionsTest do
   # async: false — one named GenServer and two application-env limits, shared by the VM.
   use ExUnit.Case, async: false
 
+  import LiveCeci.Eventually
+
   alias LiveCeci.Sessions
 
   @local {127, 0, 0, 1}
@@ -22,12 +24,26 @@ defmodule LiveCeci.SessionsTest do
     {:ok, spawned} = Agent.start(fn -> [] end)
 
     on_exit(fn ->
-      for pid <- Agent.get(spawned, & &1), do: Process.exit(pid, :kill)
+      # Kill, then WAIT for Sessions to reap them. Killing was fire-and-forget: the DOWNs
+      # are processed asynchronously, so the next test could start with slots still held
+      # and fail on a precondition it never chose. The re-audit flagged this as a latent
+      # race; eight seeds and fifteen paired runs never reproduced it, which is exactly
+      # the profile of the thing that fails once in CI a year from now.
+      pids = Agent.get(spawned, & &1)
+      for pid <- pids, do: Process.exit(pid, :kill)
+      eventually(fn -> Enum.all?(pids, &(not Process.alive?(&1))) end)
+      eventually(fn -> Sessions.total() == 0 end)
       Agent.stop(spawned)
       {total, per} = previous
       Application.put_env(:live_ceci, :max_sessions, total)
       Application.put_env(:live_ceci, :max_sessions_per_address, per)
     end)
+
+    # The precondition the re-audit asked for. socket_lifecycle_test.exs also calls
+    # Socket.init/1, which joins from 127.0.0.1 against this same singleton, so "the
+    # table is empty when I start" is an assumption worth asserting rather than hoping.
+    assert eventually(fn -> Sessions.total() == 0 end),
+           "another test left #{Sessions.total()} sessions held"
 
     %{spawned: spawned}
   end
@@ -134,14 +150,6 @@ defmodule LiveCeci.SessionsTest do
 
       for {pid, _} <- results, do: stop(pid)
       assert eventually(fn -> Sessions.total() == 0 end)
-    end
-  end
-
-  defp eventually(check, remaining \\ 1_000) do
-    cond do
-      check.() -> true
-      remaining <= 0 -> false
-      true -> Process.sleep(10) && eventually(check, remaining - 10)
     end
   end
 end
