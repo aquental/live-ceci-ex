@@ -21,7 +21,11 @@ defmodule LiveCeci.SocketLifecycleTest do
     end
 
     def send_audio(_s, _pcm), do: :ok
-    def close(session), do: send(self(), {:closed, session}) && :ok
+
+    def close(session) do
+      send(self(), {:closed, session})
+      :ok
+    end
   end
 
   defmodule FailProvider do

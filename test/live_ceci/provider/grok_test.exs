@@ -260,19 +260,15 @@ defmodule LiveCeci.Provider.GrokTest do
     # not trapping exits silently ignores — so nothing closed, and the session stayed
     # open and billed upstream until the remote gave up.
     test "asks the connection to close rather than signalling it" do
-      ws =
-        spawn(fn ->
-          receive do
-            msg -> send(:erlang.list_to_atom(~c"nobody"), msg)
-          end
-        end)
-
+      # A stand-in for the WebSockex process: it forwards whatever it is sent, so the
+      # test can assert a message actually arrived rather than inspecting a mailbox
+      # that may already have been drained.
+      test = self()
+      ws = spawn(fn -> receive(do: (msg -> send(test, {:got, msg}))) end)
       on_exit(fn -> if Process.alive?(ws), do: Process.exit(ws, :kill) end)
 
       assert :ok = Grok.close(ws)
-      # WebSockex.cast/2 wraps it; the point is that a message was actually sent.
-      assert {:message_queue_len, len} = Process.info(ws, :message_queue_len)
-      assert len >= 0
+      assert_receive {:got, {:"$websockex_cast", :close}}, 500
     end
 
     test "tolerates an already-dead session" do
