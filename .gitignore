@@ -16,3 +16,4 @@ erl_crash.dump
 !.env.example
 *.swp
 *.swo
+priv/spike/bench_utterance.wav

@@ -105,7 +105,8 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `lib/live_ceci/provider/gemini.ex` | Gemini Live, through `gemini_ex` |
 | `lib/live_ceci/provider/grok.ex` | xAI's Voice Agent, hand-rolled on `websockex` — no Elixir package speaks the OpenAI Realtime protocol |
 | `lib/live_ceci/live_session.ex` | the one upstream Gemini call, with its own timeout and `catch :exit` — a stalled session must not take the listener down |
-| `priv/spike/` | the throwaway script that verified the xAI protocol against the live API before any of it was written |
+| `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written |
+| `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `lib/live_ceci/tools.ex` | `play_playlist` / `play_track` / `skip` / `pause` — they return **instantly**, so the voice never stalls |
 | `lib/live_ceci/persona.ex` · `priv/assets/mira_persona.txt` | who Mira is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
@@ -128,6 +129,29 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 | `GET /healthz` | `200 ok` |
 | `GET /config.json` | `{"frameSamples":N}` — the only channel between `FRAME_SAMPLES` in `.env` and the AudioWorklet that applies it |
 | `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame |
+
+## Measuring latency
+
+```bash
+set -a && . ./.env && set +a && mix run --no-start priv/spike/latency_bench.exs
+```
+
+It starts its own listener on a free port, so it can flip the backend between
+connections and **interleave** GROK and GOOGLE trials — running eight of one and then
+eight of the other would make any drift in the route indistinguishable from a
+difference between the models. `BENCH_TRIALS` sets the count (default 8 each);
+`BENCH_WAV` points at your own 16 kHz mono s16le recording instead of the one `say`
+generates.
+
+It reports exactly one number, **TTFA**: from the last byte of your utterance to the
+first byte of voice back. That is the only measurement the two APIs make comparable.
+Transcript timings are deliberately *not* raced — Gemini streams the assistant
+transcript in fragments while she is still speaking, xAI sends it only once the whole
+text exists, so timing "first transcript" would measure protocol granularity and hand
+Google a few hundred milliseconds it did not earn.
+
+Read the result as a comparison, not an absolute. `SILENCE_DURATION_MS` is added to
+every number and is identical on both sides, so it compresses the relative difference.
 
 ## The WebSocket contract
 
