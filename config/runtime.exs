@@ -73,8 +73,26 @@ port =
        System.get_env("GROK_LIVE_VOICE") || "eve"}
   end
 
+# Loopback unless told otherwise. Bandit's own default is 0.0.0.0, which on a laptop on
+# café wifi puts an unauthenticated WebSocket in front of a metered API on the open LAN:
+# /ws has no origin check and no auth, and every frame it accepts spends the API key's
+# quota. BIND_IP=0.0.0.0 is the deliberate opt-in for when you want a phone to reach it.
+bind_ip =
+  case System.get_env("BIND_IP") || "127.0.0.1" do
+    address ->
+      case :inet.parse_address(String.to_charlist(address)) do
+        {:ok, parsed} ->
+          parsed
+
+        {:error, _} ->
+          IO.warn("BIND_IP=#{inspect(address)} is not an IP address; using 127.0.0.1")
+          {127, 0, 0, 1}
+      end
+  end
+
 config :live_ceci,
   provider: provider,
+  bind_ip: bind_ip,
   model: model,
   voice: voice,
   # POSIX spelling in .env, BCP-47 on the wire. Both providers want the latter.
