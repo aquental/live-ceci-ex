@@ -95,8 +95,26 @@ defmodule LiveCeci.Socket do
 
   # -------------------------------------------------------------- downstream
 
+  # Voice is the only event worth dropping, and the only one that arrives fast enough to
+  # matter. The provider pushes it with plain send/2, which never blocks the sender, while
+  # a browser that has stopped reading can hold this process inside one write for the
+  # whole send_timeout. That is the unbounded-growth path, and shedding is the right
+  # answer for LIVE audio specifically: a frame that arrives late is worth nothing anyway.
+  # Transcripts, actions and errors are never shed — they are small, and they are the
+  # events that explain what happened.
+  @max_queued 40
+
   @impl WebSock
-  def handle_info({:provider, {:voice, pcm}}, state), do: {:push, [{:binary, pcm}], state}
+  def handle_info({:provider, {:voice, pcm}}, state) do
+    case Process.info(self(), :message_queue_len) do
+      {:message_queue_len, queued} when queued > @max_queued ->
+        Logger.warning("dropping voice frame, #{queued} messages queued — browser not draining")
+        {:ok, state}
+
+      _ ->
+        {:push, [{:binary, pcm}], state}
+    end
+  end
 
   def handle_info({:provider, :interrupted}, state) do
     {:push, json(%{type: "interrupted"}), state}

@@ -47,6 +47,12 @@ defmodule LiveCeci.Provider.Grok do
       true ->
         url = "#{@endpoint}?model=#{model}"
 
+        # KNOWN LEAK, no clean fix from here: WebSockex keeps extra_headers in its
+        # %WebSockex.Conn{}, which is part of the process state, so any crash report for
+        # this process prints the bearer token. It affects the DEFAULT provider, and it is
+        # the same class as gemini_ex putting the API key in its WebSocket URL. Containing
+        # it means either patching the dependency or fronting it with a proxy process that
+        # holds the credential; neither belongs in a POC, but neither should be forgotten.
         case WebSockex.start_link(url, __MODULE__, %{owner: owner},
                extra_headers: [{"Authorization", "Bearer " <> key}]
              ) do
