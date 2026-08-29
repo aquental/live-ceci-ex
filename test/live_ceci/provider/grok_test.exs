@@ -278,6 +278,15 @@ defmodule LiveCeci.Provider.GrokTest do
     end
   end
 
+  describe "endpoint_url/1" do
+    test "the model rides in the query string, where a typo is silent" do
+      # open/1's success path needs a live socket, but this half does not — and getting
+      # it wrong connects you to a different model with everything else still working.
+      assert Grok.endpoint_url("grok-voice-latest") ==
+               "wss://api.x.ai/v1/realtime?model=grok-voice-latest"
+    end
+  end
+
   describe "open/1 failure paths" do
     test "a failed session.update closes the socket instead of leaking a billed session" do
       # start_link has already succeeded here, so xAI is billing. If session.update then

@@ -45,7 +45,7 @@ defmodule LiveCeci.Provider.Grok do
         {:error, :missing_grok_api_key}
 
       true ->
-        url = "#{@endpoint}?model=#{model}"
+        url = endpoint_url(model)
 
         # KNOWN LEAK, no clean fix from here: WebSockex keeps extra_headers in its
         # %WebSockex.Conn{}, which is part of the process state, so any crash report for
@@ -267,6 +267,11 @@ defmodule LiveCeci.Provider.Grok do
       }
     }
   end
+
+  @doc false
+  # Public only so a test can see it. The rest of open/1 needs a live socket, but the URL
+  # is where a typo silently connects you to the wrong model and everything still works.
+  def endpoint_url(model), do: "#{@endpoint}?model=#{model}"
 
   # `type: nil` hands turn-ending to the client, which is what makes commit_turn/1 mean
   # anything. Measured at 985 ms against 1818 ms for server_vad — see the behaviour doc.

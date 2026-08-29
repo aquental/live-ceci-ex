@@ -15,6 +15,10 @@ defmodule LiveCeci.Provider.Gemini do
 
   @behaviour LiveCeci.Provider
 
+  # Long enough for a healthy close, short enough that a wedged upstream cannot hold the
+  # socket process while the browser waits for the connection to actually end.
+  @close_timeout 1_000
+
   require Logger
 
   alias Gemini.Live.{Audio, Session}
@@ -86,8 +90,18 @@ defmodule LiveCeci.Provider.Gemini do
 
   @impl LiveCeci.Provider
   def close(session) do
-    if is_pid(session) and Process.alive?(session), do: Session.close(session)
+    # Session.close/1 is a GenServer.call with the default 5 s timeout, and this runs
+    # inside LiveCeci.Socket.terminate/2. An exit raised there is raised in OUR stack —
+    # trap_exit does nothing for that — so a wedged session could take down the very
+    # callback that exists to clean it up, and hold the connection process for five
+    # seconds on the way. Same guard, same reason, as LiveCeci.LiveSession.
+    if is_pid(session) and Process.alive?(session) do
+      Task.await(Task.async(fn -> Session.close(session) end), @close_timeout)
+    end
+
     :ok
+  catch
+    :exit, _reason -> :ok
   end
 
   @doc """
