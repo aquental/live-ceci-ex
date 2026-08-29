@@ -40,8 +40,11 @@ Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"*
 | `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
 | `MAX_SESSIONS` | `8` | how many live sessions may exist at once. Each holds an upstream session that is billed while it lives, and eight tabs is eight of them |
 | `MAX_SESSIONS_PER_ADDRESS` | `4` | the same, per client address. Bound to loopback the two coincide; they stop coinciding the moment `BIND_IP` opens |
-| `MAX_TICKETS_PER_ADDRESS` | `150` | how many upgrade tickets one address may hold at once. On loopback that is one person; **behind a NAT or a reverse proxy it is everyone**, and then this — not `MAX_SESSIONS` — is what caps concurrent users. A load test found this the hard way: 50 clients, `MAX_SESSIONS=100`, and 28 refusals, all at the ticket desk. **The global bound is derived at 2×**, so the two cannot be raised out of step — at that ratio a third busy address evicts the first one's live tickets, which is the number to check before raising this in a deployment with many distinct clients |
-| `ALLOWED_ORIGINS` | — | extra origins allowed to open `/ws`, comma separated, exact `scheme://host:port`. Loopback is always allowed on any port and needs no listing |
+| `MAX_TICKETS_PER_ADDRESS` | `150` | how many upgrade tickets one address may hold at once. On loopback that is one person; **behind a NAT or a reverse proxy it is everyone**, and then this — not `MAX_SESSIONS` — is what caps concurrent users. A load test found this the hard way: 50 clients, `MAX_SESSIONS=100`, and 28 refusals, all at the ticket desk. **The global bound is derived at 2×**, so the two cannot be raised out of step, and eviction takes from whichever address holds the *most* — see [Fair-share eviction](#fair-share-eviction) |
+| `MAX_SESSION_SECONDS` | `900` | how long one session may live regardless of activity. Bandit's WebSocket timeout is an **idle** timeout and an open microphone is never idle, so nothing closed a forgotten tab before this — it held a billed upstream session until the laptop slept. `30..86400` |
+| `MAX_SESSION_MB` | `100` | the same bound in bytes of microphone. 16 kHz s16le is 32 kB/s, so 100 MB is ~52 minutes of continuous speech — past the clock above, and there to catch a client sending *faster than real time*, which the clock alone would not. `1..10000` |
+| `ALLOWED_ORIGINS` | — | extra origins allowed to open `/ws`, comma separated, `scheme://host[:port]`. Compared as a parsed `{scheme, host, port}` triple, so case and a default port written either way both match. Loopback is always allowed on any port and needs no listing |
+| `TRUSTED_PROXIES` | — | addresses allowed to rewrite the client address through `X-Forwarded-For`, comma separated. **Empty by default, and while it is empty the header is ignored entirely** — anyone can send one, so trusting it without knowing who is in front of you hands every caller a supply of invented identities. You want it set if you *are* behind a proxy: without it every request appears to come from one address, which turns `MAX_SESSIONS_PER_ADDRESS` into a cap on the whole deployment |
 | `TURN_DETECTION` | `manual` | `manual` or `server` — who decides your turn ended. `manual` measured 833 ms faster on xAI and trades that against false turns. Gemini ignores it |
 | `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
 
@@ -108,23 +111,25 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `lib/live_ceci/provider.ex` | the behaviour, and why it has no `send_tool_result/3` |
 | `lib/live_ceci/provider/gemini.ex` | Gemini Live, through `gemini_ex` |
 | `lib/live_ceci/provider/grok.ex` | xAI's Voice Agent, hand-rolled on `websockex` — no Elixir package speaks the OpenAI Realtime protocol |
-| `lib/live_ceci/live_session.ex` | the process that carries mic audio to Gemini **so the socket does not** — `gemini_ex` has no cast path, so the blocking call had to move rather than disappear, and the queue is bounded |
+| `lib/live_ceci/provider/gemini/carrier.ex` | the process that carries mic audio to Gemini **so the socket does not** — `gemini_ex` has no cast path, so the blocking call had to move rather than disappear, and the queue is bounded |
 | `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written — including whether manual turn detection beats server VAD |
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `priv/spike/load_test.exs` | 50 concurrent sessions against a stub provider — see [Load](#load) |
 | `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
+| `lib/live_ceci/limits.ex` | every ceiling in one place, because three of them constrain each other — the global ticket bound is *derived* here, never configured |
 | `lib/live_ceci/sessions.ex` | the cap on concurrent sessions — a GenServer, because deciding correctly under contention means deciding one at a time |
 | `lib/live_ceci/tickets.ex` | single-use tickets for the upgrade — the browser's `new WebSocket(url)` takes no headers, so the credential cannot ride on the upgrade itself |
+| `test/support/env_sandbox.ex` | the only way a test moves `:live_ceci` config — `fetch_env/2`, because it is the one that tells *absent* from *present and nil* |
 | `lib/live_ceci/redact.ex` | `inspect/1` for anything a provider touched — both APIs echo the key back, one in its URL and one in its error text |
-| `lib/live_ceci/router.ex` | the whole HTTP surface: the upgrade behind an `Origin` check, a capacity check and a ticket; the ticket mint; static files; `/healthz`; `/config.json` |
+| `lib/live_ceci/router.ex` | the whole HTTP surface: the upgrade behind an `Origin` check, a capacity check and a ticket; the ticket mint; static files; `/healthz`; `/config.json`; the `X-Forwarded-For` plug; the per-request CSP |
 | `config/runtime.exs` | the `.env` reader, the API-key aliasing, and every knob above — refuses to read `.env` at all in `:test` |
 | `.tool-versions` · `.github/workflows/ci.yml` | what this is built with, and the gate that checks it — compile, format, test, both audits, and a compile-cycle check |
 | `priv/frontend/` | the browser client: mic worklet, voice playback, transcript, and the activity panel |
 
 Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
 
-`gemini_ex` is pinned to the minor (`~> 0.17.0`, not `~> 0.17`). It is a 0.x library that has already moved the Live WebSocket transport once in a minor release, `LiveCeci.Provider.Gemini` pattern-matches its structs in function heads, and `LiveCeci.LiveSession` calls one of its internal messages directly — so drift surfaces as a runtime error, not a compile one.
+`gemini_ex` is pinned to the minor (`~> 0.17.0`, not `~> 0.17`). It is a 0.x library that has already moved the Live WebSocket transport once in a minor release, `LiveCeci.Provider.Gemini` pattern-matches its structs in function heads, and `LiveCeci.Provider.Gemini.Carrier` calls one of its internal messages directly — so drift surfaces as a runtime error, not a compile one.
 
 ## The HTTP surface
 
@@ -134,7 +139,109 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 | `GET /healthz` | `200 ok` |
 | `GET /config.json` | `{"frameSamples":N,"silenceMs":N}` — the only channel between `.env` and the AudioWorklet that applies them |
 | `POST /ws-ticket` | mints a single-use, 30 s, address-bound ticket. Same `Origin` check as `/ws` — an endpoint that mints what `/ws` demands is worth exactly the check in front of it |
-| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame. Three checks in order: **`Origin`** (loopback on any port, plus `ALLOWED_ORIGINS`), then **capacity**, then the **ticket**. A bad or missing origin or ticket is `403`; at capacity it is `503`, and the ticket is deliberately **not** spent — it stays valid for when a slot frees |
+| `GET /ws` | the WebSocket upgrade — 60 s **idle** timeout, 1 MB max frame, 15 min wall clock, 100 MB microphone budget. Three checks in order: **`Origin`** (loopback on any port, plus `ALLOWED_ORIGINS`), then **capacity**, then the **ticket**. A bad or missing origin or ticket is `403`; at capacity it is `503`, and the ticket is deliberately **not** spent — it stays valid for when a slot frees |
+
+## What the last hardening round changed — 2026-08-29
+
+Seven findings, each reproduced before it was fixed and re-checked after. The numbers below are measurements, not estimates.
+
+### The `Origin` check let a hostile origin through, and refused a legitimate one
+
+`URI.parse("http://evil.example@localhost")` reports the host as `localhost` — the attacker's name sits in `userinfo`, a field the check never read. It answered **`true`**. And because the comparison against `ALLOWED_ORIGINS` was a raw string compare, `http://LOCALHOST:8000` answered **`false`**: hostnames are case-insensitive and browsers write them however they like.
+
+Both are gone. `userinfo` must be `nil`, the host is compared in lower case, and configured origins are compared as a parsed `{scheme, host, port}` triple — so `https://ceci.pro` and `https://ceci.pro:443` are the same entry, which they always were to a browser.
+
+While rewriting it, one row of `@loopback_hosts` turned out to be dead: `[::1]` could never match, because `URI.parse` strips the brackets and reports `::1`. It had been there two months.
+
+### `connect-src ws: wss:` was not a restriction
+
+The rest of the CSP was tight. That one directive let it all out: the bare schemes match **any host**, so a script that got onto the page could have opened a socket anywhere and streamed the microphone into it.
+
+It is pinned to the request's own host now, four ways — `'self'`, `ws://host`, `wss://host`, and both again with the port. The redundancy is deliberate: `'self'` is the correct answer and the only one that cannot be got wrong, but the browsers that implement CSP3's ws/wss-under-`'self'` rule are a narrower set than the browsers that run an AudioWorklet, and the port-less pair is what saves a deployment behind a TLS-terminating proxy, where `Host:` says `example.com`, Bandit reports port 80 because it never saw the TLS, and the page opens `wss://example.com` on 443.
+
+Verified in Chrome rather than against the spec: the same-origin socket **opens**, and `wss://echo.websocket.org/` is **blocked** with a `securitypolicyviolation` naming `connect-src`.
+
+### Presenting a stolen ticket destroyed it
+
+`consume/2` used `:ets.take/2` — remove the row, *then* check the address. So a ticket presented from the wrong address was spent, and its rightful owner's next attempt answered `{:error, :invalid}`. Whoever leaked the ticket could not use it, but could deny it.
+
+It is one atomic operation now, with the address in the match **pattern** rather than in a comparison afterwards, so a row that does not match is never touched:
+
+```elixir
+spec = [{{ticket, :"$1", address}, [{:<, {:const, now()}, :"$1"}], [true]}]
+:ets.select_delete(@table, spec)
+```
+
+The ticket is the key and is bound literally, so this is still a hash lookup on a set — 1 µs, the same as the `take` it replaces.
+
+### Fair-share eviction
+
+The global ticket bound used to evict the **globally oldest** ticket, which is the same weapon the old refuse-the-newest version was, pointed at whoever arrived *first*. Measured at the shipped defaults with three busy addresses:
+
+| | first address | second | third |
+|---|---|---|---|
+| evict oldest | **29** / 150 | 121 | 150 |
+| evict from the largest | **99** | 100 | 101 |
+
+`evict_from_largest/0` takes the oldest ticket from whichever address holds the most. That is max-min fairness: repeated eviction drives the shares together instead of apart, and no address can be starved by one that arrived later. The width is two rather than one because the address doing the inserting is never evicted from during its own insert.
+
+This is what makes the derived 2× ratio safe to keep. With *N* busy addresses each gets `2 × MAX_TICKETS_PER_ADDRESS / N` — 100 apiece at three addresses, against the 1 a browser actually needs.
+
+### A session had no end
+
+Bandit's WebSocket `:timeout` is an **idle** timeout — it is applied as ThousandIsland's `{:persistent, timeout}` and every frame read resets it — and an open microphone sends ten frames a second. It never fired. A tab left open on a second monitor held an upstream session, billed by the minute, until the laptop slept.
+
+There is a wall clock and a byte budget now, both in `LiveCeci.Limits`. Two bounds rather than one because they catch different things: the clock catches the forgotten tab, the budget catches a client sending faster than real time, which the clock alone would let run for its full fifteen minutes. Both end with an `error` frame the page already renders and a normal close, so the button turns into "↻ reconectar" and the person carries on.
+
+### `X-Forwarded-For`, opt-in only
+
+`conn.remote_ip` is the other end of the TCP connection, which behind a reverse proxy is the proxy. That does not weaken anything loudly; it weakens three things quietly. The ticket's address binding becomes a tautology, `MAX_SESSIONS_PER_ADDRESS=4` becomes a cap on the entire deployment, and every rejection log names the proxy.
+
+`TRUSTED_PROXIES` is empty by default and while it is empty the header is ignored entirely — anyone can send an `X-Forwarded-For`, and honouring it without knowing who is in front of you replaces a wrong address with an attacker-chosen one, which is worse than the problem it solves. When it is set, the walk goes right to left, dropping proxies we put there ourselves, and stops at the first address that is not one of ours. An entry that does not parse **stops the walk** rather than being skipped — skipping it would let a client insert junk to push the walk one hop further left, into a value it wrote itself.
+
+### A key inside an unprintable binary escaped redaction
+
+`Kernel.inspect` renders a binary containing any unprintable byte as a byte *list*, and `LiveCeci.Redact`'s string replace cannot see a credential spelled out one integer at a time:
+
+```
+{:error, <<3, 232, 65, 73, 122, 97, ...>>}     # the key, in full, in the log
+{:error, "\x03\xE8[REDACTED]\0"}              # binaries: :as_strings
+```
+
+One option, reproduced both ways.
+
+### And two decided rather than changed
+
+- **The ticket ETS table stays `:public`.** It is what lets `issue/1` and `consume/2` run in the connection process instead of queueing behind a single GenServer, which is the whole point of the design. There is no untrusted code in this VM to protect it from.
+- **`provider/grok.ex` stays one module.** An audit called it the largest, and it was — by a wide margin when it also carried the default model and voice, which now live in `defaults/0` where every provider's do. What is left is 222 lines against 187 in `tools.ex`. The two clean seams inside it, the session contract and the event translation, would produce three files that are only ever read together, because the thing they describe — one wire protocol with no client library — is the unit that has to stay consistent.
+
+### Then the audit found five more
+
+Run after the above, with five specialists over security, architecture, performance, tests and dependencies. Performance and dependencies came back clean. The rest:
+
+**Thirty bytes bought an unbounded number of billed model turns.** `{"type":"end_of_speech"}` becomes `input_audio_buffer.commit` + `response.create` upstream, which is the unit xAI charges for — so metering *bytes* did not meter it at all. One session, one frame in a loop, fifteen minutes. There is a 250 ms floor between commits now, plus the `backed_up?` guard `send_audio/2` had all along and `commit_turn/1` did not: the cheaper message was the unguarded one, and it was the one that asks for a response. Text frames are charged against the byte budget too, because Bandit's `max_frame_size` is a megabyte and a budget that only counted audio was a budget with a door beside it.
+
+**The capacity check ran before the ticket check.** An `Origin` header is trivial to forge from anything that is not a browser, so a flood of unauthenticated upgrades queued on the `LiveCeci.Sessions` singleton that every legitimate upgrade waits behind — and `join/1` fails *closed*, so the flood would have answered "muitas conexões" with every slot free. The obvious reorder would burn the ticket on a 503, which the code deliberately avoids. So there is a non-destructive `Tickets.valid?/2` peek first, sharing the same match spec as `consume/2` so the two cannot disagree: 0.45 µs of ETS in the connection's own process, and nothing unauthenticated reaches a GenServer.
+
+**Fair-share eviction degraded to arbitrary when everyone tied.** Three addresses holding 150 each is the case the measurement covered; 300 addresses holding one each is not, and there every bucket ties at 1 and `max_by` picks by map order — arbitrary *and stable*, so the same unlucky address loses its only ticket every time. Ties break on expiry now, which costs nothing because the fold already tracks the oldest per address.
+
+**`TRUSTED_PROXIES` could not match an IPv4-mapped peer.** Under `BIND_IP=::` the listener is dual-stack and an IPv4 client arrives as `{0, 0, 0, 0, 0, 65535, 32512, 1}` — verified. Nobody writes that in a config file, so `TRUSTED_PROXIES=10.0.0.1` would never match, the header would be ignored, and the per-address caps would silently revert to global ones. It fails closed, which is exactly what makes it hard to notice.
+
+**`MAX_TICKETS_PER_ADDRESS` could be set into a denial of service.** `issue/1` makes three linear passes over the ticket table, and the range accepted `1..100_000`. Measured per mint: 73 µs at the default 300-row table, 446 µs at 2 000, 4.0 ms at 20 000, **45 ms at 200 000** — and the deployment that gets you there is the NAT/proxy one the docs tell you to raise it for. The range is `1..2_000` now, under a millisecond a mint, with the numbers written down beside it. Going higher needs per-address counters, not a bigger number.
+
+And two the audits raised that turned out to be **wrong**, checked rather than taken:
+
+- *"`async: true` files race the `Tickets` singleton against `async: false` ones."* They cannot. ExUnit runs every async module to completion before the first sync one starts — instrumented and measured, the async module ended at `-576460751413` and the sync module started at `-576460751412`. `TicketsTest` and `SessionsTest` are both `async: false`.
+- *"`provider/grok.ex` should be split."* Argued against above, on the numbers — 222 lines against 187 in `tools.ex`, and two seams that would produce three files only ever read together.
+
+### One the tests found on themselves
+
+Adding `limits_test.exs` made a latent flake reproducible. Five test files moved `:live_ceci` config by hand, in two idioms, and both were wrong:
+
+- `on_exit(fn -> Application.delete_env(:live_ceci, :max_sessions) end)` — but `config/runtime.exs` **sets** that key at boot, in `:test` too. Deleting it does not restore it.
+- `previous = Application.get_env(...)` then writing `previous` back — which saved `nil` once a sibling had deleted the key, and then *wrote `nil`*. `get_env/3`'s default applies to an absent key, not to one set to `nil`, so `Limits.sessions_total/0` answered `nil` and the suite failed on one seed and passed on the next.
+
+`LiveCeci.EnvSandbox` is the only way tests move config now, and it uses `fetch_env/2` — the one of the three that can tell *absent* from *present and nil*. Fifteen seeds green afterwards.
 
 ## Measuring latency
 
@@ -305,23 +412,24 @@ mix format --check-formatted
 mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-**185 tests, no network:**
+**235 tests, no network. 88.0% line coverage, lowest module 75.4%:**
 
 | | |
 |---|---|
 | `provider/grok_test.exs` (41) | xAI events in, neutral events out — binary voice and the base64 fallback, barge-in, transcripts, tool dispatch, the two-message turn commit, the session shape in both turn modes, and that mic frames go out by `cast` so a slow upstream never holds the socket |
-| `provider/gemini_test.exs` (25) | real `gemini_ex` structs in, neutral events out, plus the session options the API actually reads and the `connect` failure that used to leave a billed session behind |
-| `router_test.exs` (21) | the whole HTTP surface: the `Origin` check against real hostile origins, tickets that work exactly once and only from the address they were minted for, the capacity refusal that does **not** spend the ticket, the security headers, and that nothing under `/assets` is reachable |
+| `provider/gemini_test.exs` (36) | real `gemini_ex` structs in, neutral events out, the session options the API actually reads, the `connect` failure that used to leave a billed session behind — and every callback `session_opts/1` wires **invoked**, because "the closure is present" is a weaker claim than it looks |
+| `router_test.exs` (35) | the whole HTTP surface: the `Origin` check against real hostile origins including a userinfo-smuggled one, tickets that work exactly once and only from the address they were minted for, the capacity refusal that does **not** spend the ticket, eight `X-Forwarded-For` cases including an IPv4-mapped peer, that the ticket is checked before the capacity singleton, the CSP that no longer names a bare scheme, and that nothing under `/assets` is reachable |
+| `socket_test.exs` (23) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, the one text frame the browser sends, the two bounds that end a session, and that 200 commit frames in a loop buy exactly one upstream turn |
 | `tools_test.exs` (19) | dispatch, the four declarations, the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work — that no tool declares a parameter clinical content could hide in, and that cost does not grow with what the model sends |
-| `socket_test.exs` (16) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, and the one text frame the browser sends |
+| `tickets_test.exs` (19) | single use under eight-way contention, address binding, expiry against a negative monotonic clock, that one address cannot lock everyone else out, that a wrong address does not **destroy** someone else's ticket, that eviction leaves three busy addresses within two tickets of each other, that a tie is broken on age rather than map order, and that the router's peek does not spend |
 | `live_ceci_test.exs` (14) | `config/0` reads at call time, `pt_BR` normalises to `pt-BR`, `env_int/3` falls back **loudly** on every plausible `.env` typo, and the test environment is sealed from both `.env` and the shell |
-| `redact_test.exs` (9) | the four shapes that actually leaked a key into a log, the two passes that catch them, what redaction must **not** eat — and that no `Logger` call in `lib/` inspects anything itself |
-| `tickets_test.exs` (9) | single use under eight-way contention, address binding, expiry against a negative monotonic clock, and that one address cannot lock everyone else out |
-| `sessions_test.exs` (6) | the cap, per-address, release on a brutal kill with no cleanup running, exactly five accepted out of forty concurrent joins, and the upstream closed when a connection dies badly |
-| `live_session_test.exs` (6) | the carrier never blocks its caller, its queue is bounded, and a test that reads the installed `gemini_ex` to check the internal message it depends on is still there |
+| `redact_test.exs` (11) | the shapes that actually leaked a key into a log, including one hidden inside an unprintable binary, the two passes that catch them, what redaction must **not** eat — and that no `Logger` call in `lib/` inspects anything itself |
+| `sessions_test.exs` (8) | the cap, per-address, release on a brutal kill with no cleanup running, exactly five accepted out of forty concurrent joins, the upstream closed when a connection dies badly, and that a run of refusals is one line from the timer rather than one per caller |
 | `socket_lifecycle_test.exs` (6) | the socket opened and closed for real over TCP, so `terminate/2` actually runs — the path that leaked billed provider sessions when it did not |
+| `provider/gemini/carrier_test.exs` (6) | the carrier never blocks its caller, its queue is bounded, and a test that reads the installed `gemini_ex` to check the internal message it depends on is still there |
 | `agent_name_test.exs` (5) | the agent is Ceci, in the instruction, in the `:ceci` atom, in the `"ceci"` role on the wire, and nowhere in `lib/` or `priv/frontend` under the old name |
 | `persona_test.exs` (5) | the instruction loads, carries who she is / what she will not touch / that she is live, and names every callable tool |
+| `limits_test.exs` (4) | the global ticket bound is derived at 2× whatever the per-address cap is, there is **no configuration key that could set it independently**, every ceiling answers without configuration, and the byte budget is looser than the clock for ordinary speech — otherwise the clock would never be the thing that fired |
 | `application_test.exs` (3) | one listener, bound to loopback, with everything it depends on started before it — and a killed child coming back |
 
 Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a dummy API key so config validation passes without one.
