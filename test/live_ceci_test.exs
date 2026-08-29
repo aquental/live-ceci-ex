@@ -76,7 +76,8 @@ defmodule LiveCeciTest do
                voice: "eve",
                language: nil,
                silence_duration_ms: 400,
-               frame_samples: 1600
+               frame_samples: 1600,
+               turn_detection: :manual
              } = LiveCeci.config()
     end
   end

@@ -107,4 +107,10 @@ config :live_ceci,
   # Smaller is not automatically faster — measured, 160 samples (10 ms) made latency
   # roughly 15x WORSE by head-of-line blocking on 375 frames/sec. Move it with
   # priv/spike/latency_bench.exs open.
-  frame_samples: LiveCeci.env_int("FRAME_SAMPLES", 1600, 160..16_000)
+  frame_samples: LiveCeci.env_int("FRAME_SAMPLES", 1600, 160..16_000),
+  # Who decides your turn ended. Measured on xAI, three interleaved reps against a fixed
+  # utterance: 1818 ms median with server_vad, 985 ms with the browser's gate closing the
+  # turn. Default is the fast one; TURN_DETECTION=server is the way back if false turns
+  # start cutting people off mid-sentence, which is the risk this trades for the 833 ms.
+  # Gemini ignores it — its own VAD already answers in 1220 ms.
+  turn_detection: if(System.get_env("TURN_DETECTION") == "server", do: :server, else: :manual)

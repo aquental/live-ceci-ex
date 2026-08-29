@@ -21,7 +21,8 @@ defmodule LiveCeci.Socket do
 
   ## The wire contract
 
-  Browser -> server: binary frames of 16 kHz mono PCM s16le.
+  Browser -> server: binary frames of 16 kHz mono PCM s16le, plus one JSON text frame:
+    `{"type":"end_of_speech"}`   the client's gate says the turn is over (manual mode)
   Server -> browser: binary frames of 24 kHz PCM (voice), plus JSON text frames:
     `{"type":"transcript","role":"user"|"ceci","text":...}`
     `{"type":"action","action":"agendar"|"presenca"|"recibo"|"resumo","detail":...}`
@@ -47,7 +48,7 @@ defmodule LiveCeci.Socket do
     Logger.info(
       "ws connected; opening #{inspect(provider)} session " <>
         "(model=#{config.model}, voice=#{config.voice}, language=#{config.language}, " <>
-        "silence=#{config.silence_duration_ms}ms)"
+        "silence=#{config.silence_duration_ms}ms, turns=#{config.turn_detection})"
     )
 
     case provider.open(
@@ -55,7 +56,8 @@ defmodule LiveCeci.Socket do
            model: config.model,
            voice: config.voice,
            language: config.language,
-           silence_duration_ms: config.silence_duration_ms
+           silence_duration_ms: config.silence_duration_ms,
+           turn_detection: config.turn_detection
          ) do
       {:ok, session} ->
         Logger.info("live session open")
@@ -88,8 +90,20 @@ defmodule LiveCeci.Socket do
     end
   end
 
-  # The frontend never sends text frames today; the contract reserves them for
-  # `{"type":"start"|"stop"}`, so accept and ignore rather than crash.
+  # The one text frame the browser sends. In manual turn mode the client's own gate
+  # decides when you stopped talking, and this is how it says so; the provider turns it
+  # into whatever its protocol needs. Under server VAD it is a no-op on both sides, so
+  # the frontend can send it unconditionally and neither end has to know the mode.
+  def handle_in({data, [opcode: :text]}, %{session: session, provider: provider} = state)
+      when session != nil do
+    case Jason.decode(data) do
+      {:ok, %{"type" => "end_of_speech"}} -> provider.commit_turn(session)
+      _ -> :ok
+    end
+
+    {:ok, state}
+  end
+
   def handle_in({_data, [opcode: :text]}, state), do: {:ok, state}
   def handle_in(_frame, state), do: {:ok, state}
 

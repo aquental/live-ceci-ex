@@ -74,6 +74,17 @@ defmodule LiveCeci.Provider.Gemini do
   def send_audio(session, pcm), do: LiveCeci.LiveSession.send_audio(session, pcm)
 
   @impl LiveCeci.Provider
+  def commit_turn(_session) do
+    # Deliberately nothing. Gemini can do manual turns — realtime_input takes
+    # `activity_end` once `automatic_activity_detection` is disabled — but there is no
+    # reason to reach for it here: measured over 20 interleaved trials, Gemini answers in
+    # 1220 ms with its own VAD, which is already faster than xAI manages at 985 ms with
+    # the turn closed by hand. Turning that off would trade a measured win for an
+    # unmeasured one and take on the false-turn risk to do it.
+    :ok
+  end
+
+  @impl LiveCeci.Provider
   def close(session) do
     if is_pid(session) and Process.alive?(session), do: Session.close(session)
     :ok

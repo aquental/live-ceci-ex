@@ -17,6 +17,7 @@
 const DEFAULT_FRAME_SAMPLES = 1600; // 100 ms at 16 kHz
 const HOLD_QUANTA = 3;      // ~8 ms at 48 kHz — below this it is a click, not a word
 const RELEASE_RATIO = 0.6;  // hysteresis: fall this far before the gate can re-arm
+const MAX_UTTERANCE_MS = 30000; // nobody talks this long; past it, close the turn anyway
 
 class PCMProcessor extends AudioWorkletProcessor {
   constructor(options) {
@@ -25,6 +26,16 @@ class PCMProcessor extends AudioWorkletProcessor {
     this._frac = 0;
     const opts = (options && options.processorOptions) || {};
     this._frameSamples = opts.frameSamples || DEFAULT_FRAME_SAMPLES;
+    // Manual turn mode: this gate decides when your sentence ended, in place of the
+    // provider's server VAD. Measured worth 833 ms on xAI. The budget is the SAME
+    // silence the server used, so the trade is only about who is watching, not how long.
+    this._silenceQuanta = Math.round(((opts.silenceMs || 400) * sampleRate) / 128 / 1000);
+    // No server-side safety net exists in manual mode — idle_timeout_ms lives inside the
+    // turn_detection this mode turns off. If the gate never closes, the turn never ends
+    // and she waits forever. This is that net.
+    this._maxQuanta = Math.round((MAX_UTTERANCE_MS * sampleRate) / 128 / 1000);
+    this._below = 0;   // consecutive quanta under the release level
+    this._openFor = 0; // quanta this utterance has been open
     this._buf = new Int16Array(this._frameSamples);
     this._scratch = new Float32Array(128); // one render quantum, decimation only shrinks
     this._len = 0;
@@ -63,17 +74,31 @@ class PCMProcessor extends AudioWorkletProcessor {
 
     if (rms >= this._bargeRms) {
       this._above++;
+      this._below = 0;
       if (this._above === HOLD_QUANTA && !this._open) {
         this._open = true;
+        this._openFor = 0;
         this.port.postMessage({ barge: true, rms });              // once per utterance
       }
     } else if (rms < this._bargeRms * RELEASE_RATIO) {
       this._above = 0;
-      this._open = false;
+      // The falling edge, and the only place a turn can end. It fires ONCE per utterance
+      // — _open is cleared with it — so a long pause cannot commit the same turn twice.
+      if (this._open && ++this._below >= this._silenceQuanta) this._endTurn();
     }
+
+    if (this._open && ++this._openFor >= this._maxQuanta) this._endTurn();
     return true;
   }
+  _endTurn() {
+    this._open = false;
+    this._below = 0;
+    this._openFor = 0;
+    this._flush();                          // whatever is buffered belongs to this turn
+    this.port.postMessage({ endOfSpeech: true });
+  }
   _flush() {
+    if (!this._len) return;                 // _endTurn can land on an empty buffer
     const frame = this._buf.slice(0, this._len);   // copy: _buf is reused across batches
     // No rms here any more. It used to carry the batch PEAK, which crossed the gate far
     // more readily than an instantaneous reading and made barge-in fire on room noise.

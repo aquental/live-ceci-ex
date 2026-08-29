@@ -101,6 +101,18 @@ defmodule LiveCeci.Provider.Grok do
   end
 
   @impl LiveCeci.Provider
+  def commit_turn(ws) do
+    # Two messages, like the tool handshake: the buffer becomes a user message, then the
+    # model is asked for a response. Sending only the first leaves it holding the turn.
+    # Cast for the same reason send_audio does — this runs on the socket process.
+    WebSockex.cast(ws, {:send, %{type: "input_audio_buffer.commit"}})
+    WebSockex.cast(ws, {:send, %{type: "response.create"}})
+    :ok
+  catch
+    :exit, _reason -> :ok
+  end
+
+  @impl LiveCeci.Provider
   def close(ws) do
     # Not Process.exit(ws, :normal): sent to another process that is not trapping
     # exits, a :normal signal is silently ignored, so the session stayed open upstream
@@ -244,13 +256,7 @@ defmodule LiveCeci.Provider.Grok do
         voice: voice,
         # Gemini takes a Content struct here; Grok takes a bare string.
         instructions: LiveCeci.Persona.instruction(),
-        turn_detection: %{
-          type: "server_vad",
-          silence_duration_ms: silence_ms,
-          # If the listener goes quiet this long after she finishes, she speaks first
-          # rather than both sides waiting. Long enough not to talk over a pause.
-          idle_timeout_ms: 15_000
-        },
+        turn_detection: turn_detection(Keyword.get(opts, :turn_detection, :server), silence_ms),
         audio: %{
           input:
             %{format: %{type: "audio/pcm", rate: 16_000}, transport: "binary"}
@@ -259,6 +265,24 @@ defmodule LiveCeci.Provider.Grok do
         },
         tools: tools()
       }
+    }
+  end
+
+  # `type: nil` hands turn-ending to the client, which is what makes commit_turn/1 mean
+  # anything. Measured at 985 ms against 1818 ms for server_vad — see the behaviour doc.
+  #
+  # Note what is lost with it: idle_timeout_ms lives INSIDE turn_detection, so manual mode
+  # has no server-side safety net at all. If the browser never says the turn ended, xAI
+  # waits forever. The client carries that guard now.
+  defp turn_detection(:manual, _silence_ms), do: %{type: nil}
+
+  defp turn_detection(:server, silence_ms) do
+    %{
+      type: "server_vad",
+      silence_duration_ms: silence_ms,
+      # If the listener goes quiet this long after she finishes, she speaks first rather
+      # than both sides waiting. Long enough not to talk over a pause.
+      idle_timeout_ms: 15_000
     }
   end
 

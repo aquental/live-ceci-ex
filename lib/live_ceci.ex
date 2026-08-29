@@ -33,7 +33,8 @@ defmodule LiveCeci do
           language: String.t(),
           port: pos_integer(),
           silence_duration_ms: non_neg_integer(),
-          frame_samples: pos_integer()
+          frame_samples: pos_integer(),
+          turn_detection: :manual | :server
         }
   def config do
     %{
@@ -42,7 +43,8 @@ defmodule LiveCeci do
       language: Application.get_env(:live_ceci, :language),
       port: Application.get_env(:live_ceci, :port),
       silence_duration_ms: Application.get_env(:live_ceci, :silence_duration_ms),
-      frame_samples: Application.get_env(:live_ceci, :frame_samples)
+      frame_samples: Application.get_env(:live_ceci, :frame_samples),
+      turn_detection: Application.get_env(:live_ceci, :turn_detection)
     }
   end
 

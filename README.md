@@ -37,6 +37,7 @@ Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"*
 | `GROK_LIVE_VOICE` | `eve` | Ceci's xAI voice |
 | `PORT` | `8000` | the HTTP port |
 | `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
+| `TURN_DETECTION` | `manual` | `manual` or `server` — who decides your turn ended. `manual` measured 833 ms faster on xAI and trades that against false turns. Gemini ignores it |
 | `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
 
 The last two are latency knobs, and `priv/spike/latency_bench.exs` measures what moving them buys. Both fall back **loudly**: `SILENCE_DURATION_MS=30O` (letter O) warns at boot rather than silently reverting to the default and invalidating the next benchmark run.
@@ -121,7 +122,7 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 |---|---|
 | `GET /` · `GET /main.js` · `GET /pcm-processor.js` | the client, served from `priv/frontend` |
 | `GET /healthz` | `200 ok` |
-| `GET /config.json` | `{"frameSamples":N}` — the only channel between `FRAME_SAMPLES` in `.env` and the AudioWorklet that applies it |
+| `GET /config.json` | `{"frameSamples":N,"silenceMs":N}` — the only channel between `.env` and the AudioWorklet that applies them |
 | `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame |
 
 ## Measuring latency
@@ -198,142 +199,40 @@ So the budget, with the settings above:
 threw outliers at 1130, 1216 and 1740 ms (sd 236) where Gemini stayed between 772 and
 978 (sd 63).
 
-## The two traps
+### Both xAI levers, measured — 2026-08-29
 
-**Mic audio goes to `send_realtime_input`, not `send_client_content`** — the one in [`LiveCeci.Socket`](lib/live_ceci/socket.ex). `send_client_content` is for seeding history before the conversation; point the mic at it and the live turn never fires, so you get dead air.
+Probe 10 of `priv/spike/grok_voice_spike.exs` runs the same utterance through four
+session configurations, three reps each, interleaved:
 
-**Live function calls are synchronous** — the rule that governs [`LiveCeci.Tools`](lib/live_ceci/tools.ex). The model's voice is paused until your tool returns, so `dispatch/2` is a plain function over plain data: no GenServer call, no HTTP, no `Task.await`. It decides an action, hands it to the socket process, and answers the model in the same breath. `test/live_ceci/tools_test.exs` fails if one starts doing real work — which matters more now that the tools are called `agendar_sessao` and `emitir_recibo` and *sound* like they should hit a database.
+| config | median | reps |
+|---|---:|---|
+| baseline (`server_vad`) | 1818 ms | 1717, 1818, 1919 |
+| `reasoning.effort: "none"` | 1818 ms | 1818, 1818, 1919 |
+| manual turns | 1100 ms | 1014, 1100, 1112 |
+| manual + `effort: "none"` | **985 ms** | 958, 985, 1186 |
 
-And one bug this design cannot express: a per-turn generator that has to be re-entered in an outer loop — answer one sentence, then silence forever. There is no equivalent here. The provider session *pushes* every server message into the socket's mailbox, so there is no iteration to forget to restart.
+**`reasoning.effort` does nothing.** Identical median, overlapping ranges. It had been
+called "the obvious suspect" for the 1016 ms of generation in the study above; it is
+not, and this is what refuting it looks like.
 
-## Why no Phoenix
+**Manual turns are worth 833 ms**, consistently — the manual maximum (1112 ms) sits
+below the baseline minimum (1717 ms). Now the default, with `TURN_DETECTION=server` as
+the way back.
 
-The wire contract here is **raw binary PCM frames**. Phoenix Channels would only wrap them in a JSON envelope, and LiveView can't own the audio path anyway — mic worklet and PCM playback are necessarily JS. So: `Bandit` + `Plug` + `WebSockAdapter.upgrade/4`, which is smaller and a closer match to what the app does.
+One measurement caveat: the `server_vad` rows are quantised in ~101 ms steps because the
+probe only polls between 100 ms padding sends, so they are overstated by 0-100 ms. The
+gap is eight times that, so the conclusion holds.
 
-Phoenix earns its place at the *next* step — multi-user, auth, Presence, deploy, a server-rendered UI. Then mount this same `WebSock` handler in a Phoenix router and let LiveView drive only the chrome.
-
-## What's inside
-
-| | |
-|---|---|
-| `lib/live_ceci.ex` | `config/0` — the resolved model, voice, and port |
-| `lib/live_ceci/application.ex` | starts Bandit on `PORT`, and nothing else |
-| `lib/live_ceci/socket.ex` | the bridge — provider-agnostic, six events wide |
-| `lib/live_ceci/provider.ex` | the behaviour, and why it has no `send_tool_result/3` |
-| `lib/live_ceci/provider/gemini.ex` | Gemini Live, through `gemini_ex` |
-| `lib/live_ceci/provider/grok.ex` | xAI's Voice Agent, hand-rolled on `websockex` — no Elixir package speaks the OpenAI Realtime protocol |
-| `lib/live_ceci/live_session.ex` | the one upstream Gemini call, with its own timeout and `catch :exit` — a stalled session must not take the listener down |
-| `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written — including whether manual turn detection beats server VAD |
-| `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
-| `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
-| `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
-| `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
-| `config/runtime.exs` | the `.env` reader and the API-key aliasing |
-| `priv/frontend/` | the browser client: mic worklet, voice playback, transcript, and the activity panel |
-
-Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini_ex`, `jason`, plus `mix_audit` in dev/test. That's the list.
-
-`gemini_ex` is pinned to the minor (`~> 0.17.0`, not `~> 0.17`). It is a 0.x library that has already moved the Live WebSocket transport once in a minor release, `LiveCeci.Provider.Gemini` pattern-matches its structs in function heads, and `LiveCeci.LiveSession` calls one of its internal messages directly — so drift surfaces as a runtime error, not a compile one.
-
-## The HTTP surface
-
-| Route | |
-|---|---|
-| `GET /` · `GET /main.js` · `GET /pcm-processor.js` | the client, served from `priv/frontend` |
-| `GET /healthz` | `200 ok` |
-| `GET /config.json` | `{"frameSamples":N}` — the only channel between `FRAME_SAMPLES` in `.env` and the AudioWorklet that applies it |
-| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame |
-
-## Measuring latency
-
-```bash
-set -a && . ./.env && set +a && mix run --no-start priv/spike/latency_bench.exs
-```
-
-It starts its own listener on a free port, so it can flip the backend between
-connections and **interleave** GROK and GOOGLE trials — running eight of one and then
-eight of the other would make any drift in the route indistinguishable from a
-difference between the models. `BENCH_TRIALS` sets the count (default 8 each);
-`BENCH_WAV` points at your own 16 kHz mono s16le recording instead of the one `say`
-generates.
-
-It reports exactly one number, **TTFA**: from the last byte of your utterance to the
-first byte of voice back. That is the only measurement the two APIs make comparable.
-Transcript timings are deliberately *not* raced — Gemini streams the assistant
-transcript in fragments while she is still speaking, xAI sends it only once the whole
-text exists, so timing "first transcript" would measure protocol granularity and hand
-Google a few hundred milliseconds it did not earn.
-
-Read the result as a comparison, not an absolute. `SILENCE_DURATION_MS` is added to
-every number and is identical on both sides, so it compresses the relative difference.
-
-### What it measured — 2026-08-29
-
-20 trials per backend, interleaved, no failures. `SILENCE_DURATION_MS=300`,
-`FRAME_SAMPLES=1500`, `LANGUAGE=pt-BR`, one 4.27 s pt-BR utterance, from Brazil.
-`gemini-3.1-flash-live-preview` / `Aoede` against `grok-voice-latest` / `luna`.
-
-| backend | n | p50 | p95 | min | max | sd |
-|---|---|---|---|---|---|---|
-| **Gemini Live** | 20 | **1220 ms** | 1569 ms | 1022 ms | 1728 ms | 170 |
-| **xAI Voice Agent** | 20 | **1806 ms** | 2027 ms | 1684 ms | 2210 ms | 120 |
-
-586 ms apart at the median, and the distributions barely touch: exactly **1 of 20**
-Gemini trials landed above xAI's *minimum*. With the trials interleaved, that is not
-route drift. Note the direction of the spread, though — xAI is the slower one but the
-steadier one (sd 120 vs 170).
-
-**Where the difference is not.** The bench also records when the user's transcript
-comes back, purely as a did-the-audio-land check. It turns out to be the interesting
-number:
-
-| | user transcript (p50) | TTFA (p50) | the remainder |
-|---|---|---|---|
-| Gemini Live | 793 ms | 1220 ms | **427 ms** |
-| xAI Voice Agent | 790 ms | 1806 ms | **1016 ms** |
-
-Closing the turn and transcribing the speech costs **the same 790 ms on both — a 3 ms
-difference**. The entire 586 ms gap appears downstream of that, in generation and the
-first TTS chunk, where xAI takes 2.4× as long.
-
-That settles the question the two providers invite you to ask, and in the opposite
-direction to the intuition. xAI carries audio as raw binary frames; Gemini base64s it
-inside JSON, paying 33% on the wire and an encode per mic frame. But transport only
-touches the upstream leg — which is precisely the half where the two are identical —
-and the backend that *has* binary transport is the slower one overall. At 100 ms per
-frame the base64 tax is ~1068 bytes, under a millisecond of serialisation on any real
-link. It is not where the latency lives.
-
-So the budget, with the settings above:
-
-```
- 300 ms   VAD silence            configured — yours to move
-~490 ms   ASR + network          identical on both
- 427 ms   Gemini: generation + first TTS chunk
-1016 ms   xAI:    generation + first TTS chunk
-```
-
-**Caveats.** One utterance, one language, one ~10-minute window, one network path. The
-`heard at` figures also disagree in spread even where they agree in median — xAI's ASR
-threw outliers at 1130, 1216 and 1740 ms (sd 236) where Gemini stayed between 772 and
-978 (sd 63).
-
-**Two levers still unpulled on the xAI side**, both found while verifying the above:
-
-- `session.reasoning.effort` accepts `"high"` or `"none"` and this app never sets it,
-  so Grok runs on whatever the default is. If that default is `high`, it is the obvious
-  suspect for 1016 ms of generation — and it is one field.
-- Manual turn detection works. `turn_detection.type` takes `null`, and probe 9 of the
-  spike measured **1186 ms manual against 3353 ms with server VAD** on the same audio.
-  That is n=1 and on a different clip than the table above, so treat the direction as
-  real and the magnitude as unmeasured. It trades the VAD wait for whatever the
-  browser's own gate decides, and with it the risk of turns that fire early.
+What it costs: the browser's gate is now the thing that decides you finished a sentence,
+and it can be wrong. `idle_timeout_ms` lives inside the `turn_detection` this mode turns
+off, so there is no server-side net either — the worklet carries a 30 s max-utterance
+guard instead.
 
 ## The WebSocket contract
 
 `WS /ws` — the whole contract.
 
-- **Browser → server:** binary frames, 16 kHz mono PCM s16le. Text frames are accepted and ignored; the contract reserves them for `{"type":"start"|"stop"}`, which the client doesn't send today.
+- **Browser → server:** binary frames, 16 kHz mono PCM s16le, plus one JSON text frame: `{"type":"end_of_speech"}`, sent when the client's own gate decides the sentence ended. Any other text frame is dropped. It is sent unconditionally — under `TURN_DETECTION=server` the provider ignores it, so neither end has to know the mode.
 - **Server → browser:** binary frames of 24 kHz PCM (voice), plus JSON text frames:
   `{"type":"transcript","role":"user"|"ceci","text":…}` ·
   `{"type":"action","action":"agendar"|"presenca"|"recibo"|"resumo","detail":…}` ·

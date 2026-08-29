@@ -202,12 +202,21 @@ defmodule LiveCeci.Provider.GrokTest do
       assert s.audio.output.format == %{type: "audio/pcm", rate: 24_000}
     end
 
-    test "turn detection carries both timings", %{session: s} do
+    test "server mode carries both timings", %{session: s} do
       # Silence closes a turn. Measured: leaving this unset made short utterances feel
       # like a stall.
       assert s.turn_detection.type == "server_vad"
       assert s.turn_detection.silence_duration_ms == 300
       assert s.turn_detection.idle_timeout_ms == 15_000
+    end
+
+    test "manual mode hands turn-ending to the client, and gives up the idle timeout" do
+      # type: nil is what makes commit_turn/1 mean anything. idle_timeout_ms lives INSIDE
+      # turn_detection, so it goes with it — manual mode has no server-side safety net,
+      # and the browser's max-utterance guard is the only thing left.
+      s = Grok.session_update(voice: "eve", turn_detection: :manual).session
+
+      assert s.turn_detection == %{type: nil}
     end
 
     test "the silence budget is the configured one, not a constant" do
@@ -289,6 +298,26 @@ defmodule LiveCeci.Provider.GrokTest do
                {:messages, msgs} = Process.info(ws, :messages)
                {:"$websockex_cast", :close} in msgs
              end)
+    end
+  end
+
+  describe "commit_turn/1" do
+    test "the turn is closed with two messages, not one" do
+      # input_audio_buffer.commit turns the buffer into a user message; response.create
+      # is what makes her answer it. Sending only the first leaves her holding the turn.
+      assert :ok = Grok.commit_turn(self())
+
+      assert_received {:"$websockex_cast", {:send, %{type: "input_audio_buffer.commit"}}}
+      assert_received {:"$websockex_cast", {:send, %{type: "response.create"}}}
+    end
+
+    test "a dead session is not an error — the turn is over either way" do
+      dead = spawn(fn -> :ok end)
+      ref = Process.monitor(dead)
+      assert_receive {:DOWN, ^ref, :process, ^dead, _reason}, 1_000
+
+      assert :ok = Grok.commit_turn(dead)
+      assert Process.alive?(self())
     end
   end
 

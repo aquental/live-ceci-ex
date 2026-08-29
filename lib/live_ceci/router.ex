@@ -29,8 +29,8 @@ defmodule LiveCeci.Router do
 
   get "/healthz", do: send_resp(conn, 200, "ok")
 
-  # The mic batch size lives in .env, but the code that applies it runs in an
-  # AudioWorklet. This is the only channel between them. Nothing secret goes here: the
+  # The mic batch size and the silence budget live in .env, but the code that applies
+  # them runs in an AudioWorklet. This is the only channel between them. Nothing secret goes here: the
   # browser already knows every value on this line, because it is the one enforcing it.
   #
   # Reachable only because priv/frontend holds no file by this name — the Plug.Static
@@ -40,7 +40,10 @@ defmodule LiveCeci.Router do
 
     conn
     |> put_resp_content_type("application/json")
-    |> send_resp(200, Jason.encode!(%{frameSamples: config.frame_samples}))
+    |> send_resp(
+      200,
+      Jason.encode!(%{frameSamples: config.frame_samples, silenceMs: config.silence_duration_ms})
+    )
   end
 
   get "/" do

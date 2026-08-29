@@ -60,6 +60,38 @@ defmodule LiveCeci.SocketTest do
     end
   end
 
+  describe "end of speech" do
+    test "the browser's turn signal reaches the provider" do
+      # In manual mode the client's gate decides your sentence ended. This is the only
+      # text frame the frontend sends, and this is the whole path it travels.
+      defmodule CommitStub do
+        @behaviour LiveCeci.Provider
+        def open(_opts), do: {:error, :unused}
+        def send_audio(_s, _pcm), do: :ok
+        def close(_s), do: :ok
+        def commit_turn(owner), do: send(owner, :committed) && :ok
+      end
+
+      state = %{session: self(), provider: CommitStub}
+      frame = Jason.encode!(%{type: "end_of_speech"})
+
+      assert {:ok, ^state} = Socket.handle_in({frame, [opcode: :text]}, state)
+      assert_received :committed
+    end
+
+    test "an unknown or malformed text frame is ignored, not a crash" do
+      # The browser is untrusted. Anything that is not the one frame we defined must be
+      # dropped without taking the call down.
+      state = %{session: self(), provider: LiveCeci.Provider.Grok}
+
+      for junk <- [~s({"type":"teleport"}), "not json at all", "", "[]"] do
+        assert {:ok, ^state} = Socket.handle_in({junk, [opcode: :text]}, state)
+      end
+
+      refute_received {:"$websockex_cast", _}
+    end
+  end
+
   describe "tool commands" do
     test "the action reaches the browser as the frontend's action message" do
       assert {:push, [{:text, json}], _state} =

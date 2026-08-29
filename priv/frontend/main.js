@@ -117,7 +117,13 @@ async function startMic() {
   workletNode = new AudioWorkletNode(audioCtx, "pcm-processor", {
     // bargeRms is the browser's alone; frameSamples comes from .env via /config.json.
     // Undefined is fine — the worklet falls back to the same default this does.
-    processorOptions: { bargeRms: BARGE_RMS, frameSamples: serverConfig.frameSamples },
+    // silenceMs is the same budget the provider's own VAD used; in manual turn mode this
+    // gate spends it instead. Undefined is fine — the worklet carries the same defaults.
+    processorOptions: {
+      bargeRms: BARGE_RMS,
+      frameSamples: serverConfig.frameSamples,
+      silenceMs: serverConfig.silenceMs,
+    },
   });
   workletNode.port.onmessage = (e) => {
     // pcm arrives in ~100 ms batches; rms-only messages come between them for barge-in
@@ -130,6 +136,11 @@ async function startMic() {
       else ws.send(e.data.pcm);
     }
     if (e.data.barge && speaking) stopVoice();                             // client-side barge-in
+    // Sent unconditionally. Under server VAD the provider ignores it, so neither end
+    // has to know which mode is configured.
+    if (e.data.endOfSpeech && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "end_of_speech" }));
+    }
   };
   source.connect(workletNode);
   workletNode.connect(audioCtx.destination);                              // keeps the graph alive (silent)
