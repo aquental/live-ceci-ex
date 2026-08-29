@@ -54,16 +54,37 @@ defmodule LiveCeci.Provider do
   """
   @callback send_audio(session(), binary()) :: :ok | {:error, term()}
 
+  @doc """
+  Signals that the user stopped talking, when the provider's own VAD is turned off.
+
+  Only meaningful in manual turn mode. Measured on xAI, three reps interleaved against a
+  fixed utterance: 1818 ms median from end of speech to first byte of voice with
+  `server_vad`, 985 ms with the turn closed explicitly. The silence budget stops being a
+  floor under every answer and becomes whatever the browser's own gate decides.
+
+  What it buys in latency it risks in false turns: the client is now the thing that
+  decides you finished a sentence, and it can be wrong. A provider that keeps server VAD
+  ignores this call.
+  """
+  @callback commit_turn(session()) :: :ok
+
   @doc "Closes the session. Must tolerate an already-dead session."
   @callback close(session()) :: :ok
 
   @doc """
   The provider module for this run.
 
-  Read at call time, not compile time, so `MODEL` in `.env` picks the backend
-  without a recompile — the same reason the router used to resolve its handler
-  per request. Defaults to Grok; `MODEL=GOOGLE` selects Gemini Live.
+  Read at call time, not compile time, so `MODEL` in `.env` picks the backend without a
+  recompile. `config/config.exs` holds the default and `config/runtime.exs` overrides it
+  from `MODEL`; `MODEL=GOOGLE` selects Gemini Live.
+
+  The default lives in config rather than as a fallback argument here. Naming
+  `LiveCeci.Provider.Grok` in this function made the seam depend on one of the things
+  behind it, which `mix xref --format cycles` reported as a two-node cycle: the
+  behaviour pointing at an implementation that points back at the behaviour. It was
+  runtime-only and cost nothing, but a seam that names a specific backend is the kind of
+  wrong that stops being free the day a third provider arrives.
   """
   @spec current() :: module()
-  def current, do: Application.get_env(:live_ceci, :provider, LiveCeci.Provider.Grok)
+  def current, do: Application.get_env(:live_ceci, :provider)
 end
