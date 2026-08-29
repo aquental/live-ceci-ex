@@ -107,6 +107,71 @@ defmodule LiveCeci.Provider.GeminiTest do
     end
   end
 
+  describe "session_opts/1" do
+    # Characterization: this locks the shape a working session actually used. It
+    # cannot prove the shape is right — only that nobody changed it by accident,
+    # which compiles clean and passes every other test in this file.
+    setup do
+      %{opts: Subject.session_opts(owner: self(), model: "m", voice: "Aoede", language: "pt-BR")}
+    end
+
+    test "audio only — she speaks, she does not type", %{opts: o} do
+      assert o[:generation_config].response_modalities == ["AUDIO"]
+    end
+
+    test "the voice is whatever was configured", %{opts: o} do
+      assert o[:generation_config].speech_config.voice_config.prebuilt_voice_config.voice_name ==
+               "Aoede"
+    end
+
+    test "the language rides on speech_config", %{opts: o} do
+      assert o[:generation_config].speech_config.language_code == "pt-BR"
+    end
+
+    test "no language means the key is absent, not null — the API rejects a null" do
+      o = Subject.session_opts(owner: self(), model: "m", voice: "Aoede", language: nil)
+      refute Map.has_key?(o[:generation_config].speech_config, :language_code)
+    end
+
+    test "turn detection carries the silence budget", %{opts: o} do
+      # Leaving this unset used Google's default, which made short utterances feel
+      # like a stall.
+      aad = o[:realtime_input_config].automatic_activity_detection
+      assert aad.silence_duration_ms == 500
+      assert aad.end_of_speech_sensitivity == :high
+    end
+
+    test "both transcription directions are on — the browser draws both", %{opts: o} do
+      assert o[:input_audio_transcription] == %{}
+      assert o[:output_audio_transcription] == %{}
+    end
+
+    test "the persona goes as the Content struct Gemini expects, not a string", %{opts: o} do
+      assert %{parts: [%{text: text}]} = o[:system_instruction]
+      assert text == LiveCeci.Persona.instruction()
+    end
+
+    test "every declared tool crosses over", %{opts: o} do
+      assert [%{function_declarations: declarations}] = o[:tools]
+      assert declarations == LiveCeci.Tools.declarations()
+    end
+
+    test "the callbacks the provider depends on are all wired", %{opts: o} do
+      for key <- [:on_message, :on_transcription, :on_error, :on_close, :on_tool_call] do
+        assert is_function(o[key]), "missing callback: #{key}"
+      end
+    end
+  end
+
+  describe "close/1" do
+    test "tolerates an already-dead session" do
+      pid = spawn(fn -> :ok end)
+      Process.sleep(20)
+      refute Process.alive?(pid)
+      assert :ok = Subject.close(pid)
+    end
+  end
+
   describe "tool calls" do
     test "a play_playlist call emits a command AND answers the model instantly" do
       tool_call = %ToolCall{

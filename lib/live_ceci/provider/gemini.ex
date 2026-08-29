@@ -20,12 +20,23 @@ defmodule LiveCeci.Provider.Gemini do
 
   @impl LiveCeci.Provider
   def open(opts) do
+    with {:ok, session} <- Session.start_link(session_opts(opts)),
+         :ok <- Session.connect(session) do
+      {:ok, session}
+    end
+  end
+
+  @doc false
+  # Public only so a test can see it. This keyword list is the entire behaviour
+  # contract of a session — voice, persona, tools, transcription, VAD timings — and a
+  # typo in any of it compiles clean and misbehaves at runtime.
+  def session_opts(opts) do
     owner = Keyword.fetch!(opts, :owner)
     model = Keyword.fetch!(opts, :model)
     voice = Keyword.fetch!(opts, :voice)
     language = Keyword.get(opts, :language)
 
-    session_opts = [
+    [
       model: model,
       system_instruction: LiveCeci.Persona.system_instruction(),
       tools: LiveCeci.Tools.live_tools(),
@@ -54,11 +65,6 @@ defmodule LiveCeci.Provider.Gemini do
       on_close: &send(owner, {:provider, {:closed, &1}}),
       on_tool_call: fn tool_call -> handle_tool_call(tool_call, owner) end
     ]
-
-    with {:ok, session} <- Session.start_link(session_opts),
-         :ok <- Session.connect(session) do
-      {:ok, session}
-    end
   end
 
   @impl LiveCeci.Provider
