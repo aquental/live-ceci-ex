@@ -153,6 +153,68 @@ Google a few hundred milliseconds it did not earn.
 Read the result as a comparison, not an absolute. `SILENCE_DURATION_MS` is added to
 every number and is identical on both sides, so it compresses the relative difference.
 
+### What it measured — 2026-08-29
+
+20 trials per backend, interleaved, no failures. `SILENCE_DURATION_MS=300`,
+`FRAME_SAMPLES=1500`, `LANGUAGE=pt-BR`, one 4.27 s pt-BR utterance, from Brazil.
+`gemini-3.1-flash-live-preview` / `Aoede` against `grok-voice-latest` / `luna`.
+
+| backend | n | p50 | p95 | min | max | sd |
+|---|---|---|---|---|---|---|
+| **Gemini Live** | 20 | **1220 ms** | 1569 ms | 1022 ms | 1728 ms | 170 |
+| **xAI Voice Agent** | 20 | **1806 ms** | 2027 ms | 1684 ms | 2210 ms | 120 |
+
+586 ms apart at the median, and the distributions barely touch: exactly **1 of 20**
+Gemini trials landed above xAI's *minimum*. With the trials interleaved, that is not
+route drift. Note the direction of the spread, though — xAI is the slower one but the
+steadier one (sd 120 vs 170).
+
+**Where the difference is not.** The bench also records when the user's transcript
+comes back, purely as a did-the-audio-land check. It turns out to be the interesting
+number:
+
+| | user transcript (p50) | TTFA (p50) | the remainder |
+|---|---|---|---|
+| Gemini Live | 793 ms | 1220 ms | **427 ms** |
+| xAI Voice Agent | 790 ms | 1806 ms | **1016 ms** |
+
+Closing the turn and transcribing the speech costs **the same 790 ms on both — a 3 ms
+difference**. The entire 586 ms gap appears downstream of that, in generation and the
+first TTS chunk, where xAI takes 2.4× as long.
+
+That settles the question the two providers invite you to ask, and in the opposite
+direction to the intuition. xAI carries audio as raw binary frames; Gemini base64s it
+inside JSON, paying 33% on the wire and an encode per mic frame. But transport only
+touches the upstream leg — which is precisely the half where the two are identical —
+and the backend that *has* binary transport is the slower one overall. At 100 ms per
+frame the base64 tax is ~1068 bytes, under a millisecond of serialisation on any real
+link. It is not where the latency lives.
+
+So the budget, with the settings above:
+
+```
+ 300 ms   VAD silence            configured — yours to move
+~490 ms   ASR + network          identical on both
+ 427 ms   Gemini: generation + first TTS chunk
+1016 ms   xAI:    generation + first TTS chunk
+```
+
+**Caveats.** One utterance, one language, one ~10-minute window, one network path. The
+`heard at` figures also disagree in spread even where they agree in median — xAI's ASR
+threw outliers at 1130, 1216 and 1740 ms (sd 236) where Gemini stayed between 772 and
+978 (sd 63).
+
+**Two levers still unpulled on the xAI side**, both found while verifying the above:
+
+- `session.reasoning.effort` accepts `"high"` or `"none"` and this app never sets it,
+  so Grok runs on whatever the default is. If that default is `high`, it is the obvious
+  suspect for 1016 ms of generation — and it is one field.
+- Manual turn detection works. `turn_detection.type` takes `null`, and probe 9 of the
+  spike measured **1186 ms manual against 3353 ms with server VAD** on the same audio.
+  That is n=1 and on a different clip than the table above, so treat the direction as
+  real and the magnitude as unmeasured. It trades the VAD wait for whatever the
+  browser's own gate decides, and with it the risk of turns that fire early.
+
 ## The WebSocket contract
 
 `WS /ws` — unchanged from the Python server.
