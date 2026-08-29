@@ -131,6 +131,7 @@ defmodule GrokSpike do
     probe_binary_input(ws)
     probe_tool_call(ws)
     probe_manual_turn(ws)
+    probe_latency_matrix(ws, voice, language)
     summary()
   end
 
@@ -257,10 +258,13 @@ defmodule GrokSpike do
     end
   end
 
+  # Asks for something OPERATIONAL. It used to ask for music, which passed until the
+  # tools became scheduling and receipts — after which the model correctly declined to
+  # call anything, and the probe reported a shape problem that did not exist.
   defp probe_tool_call(ws) do
     drain(500)
     t = now()
-    say(ws, "toca uma musica rapida")
+    say(ws, "marca a M ponto S ponto na terça que vem às quatorze horas")
 
     case wait_for(["response.function_call_arguments.done"], 20_000) do
       %{"name" => name, "call_id" => id, "arguments" => args} ->
@@ -463,6 +467,176 @@ defmodule GrokSpike do
       0 -> nil
     end
   end
+
+  # ---- probe 10: which session settings actually make her faster ---------------
+  #
+  # Two levers were found but never measured against each other:
+  #
+  #   turn_detection: null   replaces server VAD's silence wait with an explicit commit.
+  #                          Probe 9 measured it once, at 1186 ms against 3353 ms. n=1.
+  #   reasoning.effort       documented as "high" | "none", and this app never sets it.
+  #                          If the default is "high" it is the obvious suspect for the
+  #                          1016 ms of generation the latency study attributed to xAI.
+  #
+  # This runs the same utterance through all four combinations, @reps times each,
+  # INTERLEAVED — one rep of every config per round. Running all of one and then all of
+  # another makes a change in the route indistinguishable from a change in the config,
+  # which is the same reason latency_bench.exs interleaves its two backends.
+  #
+  # The utterance is the WAV latency_bench.exs generates, so the two measurements are
+  # talking about the same speech.
+
+  @reps 3
+  @configs [
+    {"baseline", %{turn_detection: %{type: "server_vad", silence_duration_ms: 300}}},
+    {"effort=none",
+     %{
+       turn_detection: %{type: "server_vad", silence_duration_ms: 300},
+       reasoning: %{effort: "none"}
+     }},
+    {"manual", %{turn_detection: %{type: nil}}},
+    {"manual+none", %{turn_detection: %{type: nil}, reasoning: %{effort: "none"}}}
+  ]
+
+  defp probe_latency_matrix(ws, voice, language) do
+    case load_bench_wav() do
+      nil ->
+        warn(
+          "10. latency matrix",
+          "skipped — no bench_utterance.wav; run latency_bench.exs first"
+        )
+
+      pcm ->
+        IO.puts("\n  measuring #{length(@configs)} configs x #{@reps} reps, interleaved …")
+
+        results =
+          Enum.reduce(1..@reps, %{}, fn rep, acc ->
+            Enum.reduce(@configs, acc, fn {label, patch}, acc ->
+              ms = measure_config(ws, voice, language, label, patch, pcm)
+              IO.puts("    #{String.pad_trailing(label, 14)} ##{rep}  #{ms || "—"} ms")
+              Map.update(acc, label, [ms], &[ms | &1])
+            end)
+          end)
+
+        report_matrix(results)
+    end
+  end
+
+  defp measure_config(ws, voice, language, _label, patch, pcm) do
+    session = Map.merge(base_session(voice, language), patch)
+    send_json(ws, %{type: "session.update", session: session})
+
+    case wait_for(["session.updated", "error"], 10_000) do
+      %{"type" => "error"} = e ->
+        fail("10. latency matrix", inspect(Map.get(e, "error", e)))
+        nil
+
+      _ ->
+        settle()
+        stream_speech(ws, pcm)
+        t0 = now()
+        flush()
+
+        found =
+          if patch.turn_detection.type == nil do
+            send_json(ws, %{type: "input_audio_buffer.commit"})
+            send_json(ws, %{type: "response.create"})
+            wait_for_audio(20_000)
+          else
+            await_audio_padding(ws, 30)
+          end
+
+        if found, do: now() - t0, else: nil
+    end
+  end
+
+  defp report_matrix(results) do
+    IO.puts("")
+
+    rows =
+      for {label, _} <- @configs do
+        values = results |> Map.get(label, []) |> Enum.reject(&is_nil/1) |> Enum.sort()
+        {label, values}
+      end
+
+    for {label, values} <- rows do
+      case values do
+        [] ->
+          IO.puts("    #{String.pad_trailing(label, 14)} no answer in any rep")
+
+        _ ->
+          median = Enum.at(values, div(length(values), 2))
+          IO.puts("    #{String.pad_trailing(label, 14)} median #{median} ms  #{inspect(values)}")
+      end
+    end
+
+    verdict_matrix(rows)
+  end
+
+  # The whole point of the probe: is any of this worth wiring into the provider?
+  defp verdict_matrix(rows) do
+    medians =
+      for {label, [_ | _] = values} <- rows,
+          do: {label, Enum.at(Enum.sort(values), div(length(values), 2))}
+
+    case {Enum.find(medians, &(elem(&1, 0) == "baseline")), medians} do
+      {nil, _} ->
+        fail("10. latency matrix", "baseline never answered — nothing to compare against")
+
+      {{_, base}, all} ->
+        {best_label, best} = Enum.min_by(all, &elem(&1, 1))
+        saved = base - best
+
+        detail =
+          Enum.map_join(all, ", ", fn {l, v} -> "#{l} #{v}ms" end) <>
+            " — best #{best_label}, #{saved} ms under baseline"
+
+        # n = @reps. Enough to decide whether to build it, not to quote a number.
+        if best_label != "baseline" and saved > 200 do
+          ok("10. latency matrix", detail)
+        else
+          warn("10. latency matrix", detail <> " (nothing clearly worth the risk)")
+        end
+    end
+  end
+
+  # The same map probe 3 sends, minus the turn_detection it is varying.
+  defp base_session(voice, language) do
+    %{
+      voice: voice,
+      instructions: persona_text(),
+      audio: %{
+        input:
+          %{format: %{type: "audio/pcm", rate: 16_000}, transport: "binary"}
+          |> maybe_transcription(language),
+        output: %{format: %{type: "audio/pcm", rate: 24_000}, transport: "binary"}
+      }
+    }
+  end
+
+  # 16 kHz mono s16le, the same file latency_bench.exs paces through the real server.
+  defp load_bench_wav do
+    path = Path.join(__DIR__, "bench_utterance.wav")
+
+    with true <- File.exists?(path),
+         {:ok, <<"RIFF", _::little-32, "WAVE", rest::binary>>} <- File.read(path),
+         %{"data" => data} <- wav_chunks(rest, %{}) do
+      data
+    else
+      _ -> nil
+    end
+  end
+
+  defp wav_chunks(<<id::binary-4, size::little-32, body::binary-size(size), rest::binary>>, acc) do
+    rest =
+      if rem(size, 2) == 1 and byte_size(rest) > 0,
+        do: binary_part(rest, 1, byte_size(rest) - 1),
+        else: rest
+
+    wav_chunks(rest, Map.put_new(acc, id, body))
+  end
+
+  defp wav_chunks(_trailing, acc), do: acc
 
   # ---- plumbing --------------------------------------------------------------
 
