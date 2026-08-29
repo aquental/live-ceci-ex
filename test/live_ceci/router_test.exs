@@ -9,7 +9,7 @@ defmodule LiveCeci.RouterTest do
 
   # The RFC6455 handshake headers WebSockAdapter validates before upgrading. "host" has to
   # go in directly: Plug.Conn.put_req_header/3 refuses it, but the validation reads the header.
-  defp ws_conn do
+  defp ws_conn(origin \\ "http://localhost:8000") do
     conn =
       conn(:get, "/ws")
       |> put_req_header("connection", "upgrade")
@@ -17,7 +17,61 @@ defmodule LiveCeci.RouterTest do
       |> put_req_header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
       |> put_req_header("sec-websocket-version", "13")
 
+    conn = if origin, do: put_req_header(conn, "origin", origin), else: conn
     %{conn | req_headers: [{"host", "localhost"} | conn.req_headers]}
+  end
+
+  describe "the Origin check on /ws" do
+    # This route had no test at all — ws_conn/0 was defined and never called — which is
+    # how an unauthenticated upgrade survived an audit that flagged it. There are no
+    # cookies here to steal, but every session opened is billed against the API key.
+
+    test "a page from another site cannot open a session" do
+      # Demonstrated before the check existed: this exact request was answered with
+      # 101 Switching Protocols.
+      conn = call(ws_conn("https://evil.example"))
+
+      assert conn.status == 403
+      assert conn.resp_body == "forbidden"
+    end
+
+    test "no Origin header is rejected too" do
+      # A browser always sends one on a WebSocket handshake, so an absent Origin is not a
+      # browser. Waving those through is the usual way an origin check becomes decorative.
+      conn = call(ws_conn(nil))
+
+      assert conn.status == 403
+    end
+
+    test "the page this server serves is allowed" do
+      # Not asserting 101: Plug.Test cannot complete a real upgrade. What matters is that
+      # it did NOT take the 403 branch.
+      refute call(ws_conn("http://localhost:8000")).status == 403
+      refute call(ws_conn("http://127.0.0.1:8000")).status == 403
+    end
+
+    test "loopback is allowed on any port, because ephemeral ports exist" do
+      # latency_bench.exs starts its own listener on whatever the OS hands it. Pinning the
+      # port would fight that for no security gain while bound to 127.0.0.1.
+      refute call(ws_conn("http://localhost:54321")).status == 403
+    end
+
+    test "a hostname that merely contains a loopback name is not loopback" do
+      # The failure a naive String.contains?/2 would have: these are real, buyable domains.
+      for hostile <- [
+            "https://localhost.evil.example",
+            "https://evil.example/localhost",
+            "http://127.0.0.1.evil.example"
+          ] do
+        assert call(ws_conn(hostile)).status == 403, "#{hostile} was allowed"
+      end
+    end
+
+    test "a garbage Origin is rejected, not a crash" do
+      for junk <- ["", "not a uri", "file:///etc/passwd", "javascript:alert(1)"] do
+        assert call(ws_conn(junk)).status == 403, "#{inspect(junk)} was allowed"
+      end
+    end
   end
 
   describe "plain routes" do

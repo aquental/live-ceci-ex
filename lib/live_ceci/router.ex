@@ -16,6 +16,8 @@ defmodule LiveCeci.Router do
 
   use Plug.Router
 
+  require Logger
+
   # Cheap, and none of it depends on the app being hardened. The page loads no third-party
   # anything — its own stylesheet is inline, its scripts are two same-origin files, and
   # the only network it opens is a WebSocket back here — so a policy this tight costs
@@ -41,6 +43,32 @@ defmodule LiveCeci.Router do
     |> put_resp_header("cross-origin-opener-policy", "same-origin")
   end
 
+  # Cross-Site WebSocket Hijacking, closed. Without this, ANY page the developer visits
+  # could open a session here — demonstrated, not theoretical: `Origin: https://evil.example`
+  # was answered with 101 Switching Protocols. There are no cookies to steal, but every
+  # session opened is billed against the API key, which is enough.
+  #
+  # Loopback origins are allowed on ANY port, deliberately. Bound to 127.0.0.1 the only
+  # pages that can reach us are served from this machine, and pinning the port would fight
+  # every ephemeral one — latency_bench.exs starts its own listener on whatever the OS
+  # hands it. The gap that leaves is another local dev server on a different port, which
+  # on a POC bound to loopback is a trade worth making and worth writing down.
+  @loopback_hosts ~w(localhost 127.0.0.1 ::1 [::1])
+
+  @doc false
+  # Public so a test can reach it without a live socket.
+  def origin_allowed?(origin) when is_binary(origin) do
+    case URI.parse(origin) do
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and is_binary(host) ->
+        host in @loopback_hosts or origin in LiveCeci.config().allowed_origins
+
+      _ ->
+        false
+    end
+  end
+
+  def origin_allowed?(_origin), do: false
+
   # There is deliberately no Plug.Static over priv/assets. It used to serve four mp3s to
   # the music player; with the tools operational, nothing in the browser fetches from
   # there any more — and what remains in that directory is ceci_persona.txt, the system
@@ -55,9 +83,28 @@ defmodule LiveCeci.Router do
   plug :dispatch
 
   get "/ws" do
-    conn
-    |> WebSockAdapter.upgrade(LiveCeci.Socket, [], timeout: 60_000, max_frame_size: 1_000_000)
-    |> halt()
+    case get_req_header(conn, "origin") do
+      [origin] ->
+        if origin_allowed?(origin) do
+          conn
+          |> WebSockAdapter.upgrade(LiveCeci.Socket, [],
+            timeout: 60_000,
+            max_frame_size: 1_000_000
+          )
+          |> halt()
+        else
+          Logger.warning("rejected /ws upgrade from origin #{inspect(origin)}")
+          conn |> send_resp(403, "forbidden") |> halt()
+        end
+
+      _missing ->
+        # A browser ALWAYS sends Origin on a WebSocket handshake, so an absent one is not
+        # a browser. Rejected rather than waved through: "allow when absent" is the usual
+        # way an origin check ends up decorative. Non-browser clients that belong here —
+        # priv/spike/latency_bench.exs is the one — send an Origin of their own.
+        Logger.warning("rejected /ws upgrade with no Origin header")
+        conn |> send_resp(403, "forbidden") |> halt()
+    end
   end
 
   get "/healthz", do: send_resp(conn, 200, "ok")

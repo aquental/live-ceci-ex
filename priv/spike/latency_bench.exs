@@ -33,7 +33,13 @@ defmodule LatencyBench.Client do
   # it to the bench process; the bench does all the deciding.
   use WebSockex
 
-  def start(url, owner), do: WebSockex.start_link(url, __MODULE__, %{owner: owner})
+  def start(url, owner) do
+    # The Origin the router now requires. A browser sends one automatically; this is not
+    # a browser, and the router rejects a missing header rather than waving it through.
+    WebSockex.start_link(url, __MODULE__, %{owner: owner},
+      extra_headers: [{"Origin", "http://127.0.0.1"}]
+    )
+  end
 
   @impl true
   def handle_frame({:binary, pcm}, state) do

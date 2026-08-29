@@ -34,7 +34,8 @@ defmodule LiveCeci do
           port: pos_integer(),
           silence_duration_ms: non_neg_integer(),
           frame_samples: pos_integer(),
-          turn_detection: :manual | :server
+          turn_detection: :manual | :server,
+          allowed_origins: [String.t()]
         }
   def config do
     %{
@@ -44,7 +45,8 @@ defmodule LiveCeci do
       port: Application.get_env(:live_ceci, :port),
       silence_duration_ms: Application.get_env(:live_ceci, :silence_duration_ms),
       frame_samples: Application.get_env(:live_ceci, :frame_samples),
-      turn_detection: Application.get_env(:live_ceci, :turn_detection)
+      turn_detection: Application.get_env(:live_ceci, :turn_detection),
+      allowed_origins: Application.get_env(:live_ceci, :allowed_origins, [])
     }
   end
 

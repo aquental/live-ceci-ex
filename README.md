@@ -37,6 +37,7 @@ Try: *"oi Ceci"* · *"marca a M.S. terça às 14h"* · *"emite o recibo de 250"*
 | `GROK_LIVE_VOICE` | `eve` | Ceci's xAI voice |
 | `PORT` | `8000` | the HTTP port |
 | `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
+| `ALLOWED_ORIGINS` | — | extra origins allowed to open `/ws`, comma separated, exact `scheme://host:port`. Loopback is always allowed on any port and needs no listing |
 | `TURN_DETECTION` | `manual` | `manual` or `server` — who decides your turn ended. `manual` measured 833 ms faster on xAI and trades that against false turns. Gemini ignores it |
 | `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
 
@@ -123,7 +124,7 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 | `GET /` · `GET /main.js` · `GET /pcm-processor.js` | the client, served from `priv/frontend` |
 | `GET /healthz` | `200 ok` |
 | `GET /config.json` | `{"frameSamples":N,"silenceMs":N}` — the only channel between `.env` and the AudioWorklet that applies them |
-| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame |
+| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame, **`Origin` checked**: loopback on any port, plus `ALLOWED_ORIGINS`. Everything else, including a missing header, gets 403 |
 
 ## Measuring latency
 

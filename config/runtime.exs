@@ -113,4 +113,13 @@ config :live_ceci,
   # turn. Default is the fast one; TURN_DETECTION=server is the way back if false turns
   # start cutting people off mid-sentence, which is the risk this trades for the 833 ms.
   # Gemini ignores it — its own VAD already answers in 1220 ms.
-  turn_detection: if(System.get_env("TURN_DETECTION") == "server", do: :server, else: :manual)
+  turn_detection: if(System.get_env("TURN_DETECTION") == "server", do: :server, else: :manual),
+  # Extra origins allowed to open /ws, comma separated, exact scheme://host:port. Loopback
+  # origins are always allowed and do not need listing — see LiveCeci.Router. This is for
+  # the day BIND_IP opens up and a real page needs in.
+  allowed_origins:
+    System.get_env("ALLOWED_ORIGINS")
+    |> to_string()
+    |> String.split(",", trim: true)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
