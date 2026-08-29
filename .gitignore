@@ -10,5 +10,9 @@ erl_crash.dump
 .elixir_ls/
 .lexical/
 
-# your key lives here
+# your keys live here — and .env.swp, which vim leaves behind, holds them too
 .env
+.env.*
+!.env.example
+*.swp
+*.swo
