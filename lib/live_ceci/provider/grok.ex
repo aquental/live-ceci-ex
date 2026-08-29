@@ -51,8 +51,20 @@ defmodule LiveCeci.Provider.Grok do
                extra_headers: [{"Authorization", "Bearer " <> key}]
              ) do
           {:ok, ws} ->
-            with :ok <- send_json(ws, session_update(opts)) do
-              {:ok, ws}
+            case send_json(ws, session_update(opts)) do
+              :ok ->
+                {:ok, ws}
+
+              {:error, reason} ->
+                # Close before returning. By this line the upstream session is already
+                # OPEN and billed; the `with` that used to be here dropped `ws` on the
+                # floor and left it that way until xAI's own timeout. Nothing downstream
+                # cleans it up: Socket.init stores session: nil on an error, so
+                # terminate/2 never calls close/1, and the socket's :normal exit is
+                # ignored by a WebSockex process that does not trap. Exactly the leak the
+                # comment on close/1 describes, arriving through a different door.
+                close(ws)
+                {:error, reason}
             end
 
           {:error, reason} ->
@@ -65,7 +77,19 @@ defmodule LiveCeci.Provider.Grok do
   def send_audio(ws, pcm) do
     # Straight out as a binary frame — no envelope, no base64. The session negotiated
     # `transport: "binary"`, so this is what the server expects on the input buffer.
-    WebSockex.send_frame(ws, {:binary, pcm}, @send_timeout)
+    #
+    # A cast, not send_frame/3. The socket process is BOTH directions for one listener:
+    # it takes the microphone in handle_in/2 and pushes her voice out in handle_info/2.
+    # send_frame/3 is a :gen.call, so a slow upstream ACK held the socket for up to a
+    # second per ~100 ms mic frame, and voice frames already decoded and ready for the
+    # browser waited behind it. Casting hands the frame to the WebSockex process and
+    # returns immediately; that process is where the waiting belongs.
+    #
+    # What this gives up is per-frame backpressure and a per-frame error. Neither was
+    # worth much: send_audio's only caller already logs and drops on error, and a dropped
+    # mic frame is survivable by design. A dead session still surfaces through
+    # handle_disconnect/2 as {:closed, reason}.
+    WebSockex.cast(ws, {:send_audio, pcm})
   catch
     :exit, reason -> {:error, {:exit, reason}}
   end
@@ -113,6 +137,8 @@ defmodule LiveCeci.Provider.Grok do
   def handle_cast({:send, payload}, state) do
     {:reply, {:text, Jason.encode!(payload)}, state}
   end
+
+  def handle_cast({:send_audio, pcm}, state), do: {:reply, {:binary, pcm}, state}
 
   @impl WebSockex
   def handle_disconnect(%{reason: reason}, state) do

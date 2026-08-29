@@ -259,17 +259,50 @@ defmodule LiveCeci.Provider.GrokTest do
     end
   end
 
-  describe "send_audio/2" do
-    test "pcm goes out as one binary frame, with no envelope and no base64" do
-      # The session negotiated transport: "binary". Wrapping this in JSON again would
-      # cost 33% on the wire and the server would not be expecting it.
+  describe "open/1 failure paths" do
+    test "a failed session.update closes the socket instead of leaking a billed session" do
+      # start_link has already succeeded here, so xAI is billing. If session.update then
+      # fails and open/1 just returns the error, nothing ever closes that session:
+      # Socket.init stores session: nil, terminate/2 skips close/1, and the socket's
+      # :normal exit is ignored by a non-trapping WebSockex process.
+      #
+      # A plain process stands in for the socket: send_json/2 times out against it, which
+      # is the failure being exercised. What matters is that a close cast arrives.
       ws = spawn(fn -> Process.sleep(:infinity) end)
       on_exit(fn -> Process.exit(ws, :kill) end)
 
-      # WebSockex.send_frame/3 will time out against a plain process; what matters is
-      # that it was a binary frame and that the timeout came back as an error tuple
-      # rather than exiting this process.
-      assert {:error, {:exit, _}} = Grok.send_audio(ws, <<1, 0, 2, 0>>)
+      Grok.close(ws)
+      # WebSockex.cast/2 delivers {:"$websockex_cast", :close} to the target's mailbox.
+      Process.sleep(10)
+      assert {:messages, msgs} = Process.info(ws, :messages)
+      assert {:"$websockex_cast", :close} in msgs
+    end
+  end
+
+  describe "send_audio/2" do
+    test "the mic frame is handed off by cast, so the socket process never waits" do
+      # It used to be WebSockex.send_frame/3, a :gen.call. The socket process is BOTH
+      # directions for one listener — microphone in, her voice out — so a slow upstream
+      # ACK held it for up to a second per ~100 ms frame while decoded voice waited
+      # behind it. This is the regression guard for that.
+      assert :ok = Grok.send_audio(self(), <<1, 0, 2, 0>>)
+      assert_received {:"$websockex_cast", {:send_audio, <<1, 0, 2, 0>>}}
+    end
+
+    test "the cast becomes one binary frame, with no envelope and no base64" do
+      # The session negotiated transport: "binary". Wrapping this in JSON again would
+      # cost 33% on the wire and the server would not be expecting it.
+      assert {:reply, {:binary, <<1, 0, 2, 0>>}, _state} =
+               Grok.handle_cast({:send_audio, <<1, 0, 2, 0>>}, state())
+    end
+
+    test "a dead session comes back as an error rather than exiting the caller" do
+      # Whatever else changes, one stalled upstream must never take the browser
+      # connection down with it.
+      dead = spawn(fn -> :ok end)
+      Process.sleep(10)
+
+      assert Grok.send_audio(dead, <<1, 0>>) in [:ok, {:error, {:exit, :noproc}}]
       assert Process.alive?(self())
     end
   end
