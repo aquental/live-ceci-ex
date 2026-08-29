@@ -295,12 +295,17 @@ end
 
 ### P3-2 · `get "/"` is unreachable dead code
 
-- **Location**: `lib/live_ceci/router.ex:46-48`
-- **Issue**: `plug Plug.Static` at line 19 runs before `plug :match` and carries
-  `index: ["index.html"]`, so it serves `/` and halts. The `send_file/3` route never
-  executes. Not exploitable — the path is a compile-time constant with no user input —
-  but it is a second, unaudited file-serving code path that will drift.
-- **Fix**: delete it.
+> **RETRACTED by the orchestrator after acting on it.** This finding is wrong. It reasons
+> that `Plug.Static` at `"/"` with `index: ["index.html"]` serves the root before
+> `plug :match` is reached. `Plug.Static` has **no `:index` option** — the string "index"
+> does not occur anywhere in `deps/plug/lib/plug/static.ex` — so the option was silently
+> ignored and `get "/"` was the only thing serving the front page.
+>
+> I verified the finding by reading plug order, which was not enough: the order was right
+> and the premise about Static was not. Deleting the route turned `/` into a 404, caught
+> by `router_test.exs` before it was committed. The bogus `:index` option that invited
+> the mistake has been removed, and a test now pins the behaviour instead of the
+> reasoning.
 
 ### P3-3 · No TLS termination in-process
 

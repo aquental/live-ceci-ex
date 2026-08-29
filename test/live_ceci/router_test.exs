@@ -51,6 +51,37 @@ defmodule LiveCeci.RouterTest do
                ["frameSamples", "silenceMs"]
     end
 
+    test "no file in priv/frontend shadows a route" do
+      # Plug.Static runs BEFORE plug :match, so a file that happens to share a route's
+      # name silently wins. /config.json is the live example: the moduledoc claims the
+      # route works "only because priv/frontend holds no file by this name", and nothing
+      # was checking that claim.
+      routes = ["config.json", "healthz", "ws"]
+      files = Path.join(:code.priv_dir(:live_ceci), "frontend") |> File.ls!()
+
+      for route <- routes do
+        refute route in files,
+               "priv/frontend/#{route} shadows the #{route} route — Plug.Static wins"
+      end
+    end
+
+    test "the security headers are on every response" do
+      # The page loads no third-party anything, so the policy can be this tight for free.
+      conn = call(conn(:get, "/healthz"))
+
+      assert [csp] = get_resp_header(conn, "content-security-policy")
+      assert csp =~ "default-src 'self'"
+      # The AudioWorklet needs worker-src; script-src alone does not cover addModule.
+      assert csp =~ "worker-src 'self' blob:"
+      # Her voice is played from AudioBuffers.
+      assert csp =~ "media-src 'self' blob:"
+      # The socket back to us.
+      assert csp =~ "connect-src 'self' ws: wss:"
+
+      assert ["nosniff"] = get_resp_header(conn, "x-content-type-options")
+      assert ["no-referrer"] = get_resp_header(conn, "referrer-policy")
+    end
+
     test "an unknown path is a 404, not a crash" do
       conn = call(conn(:get, "/no-such-thing"))
 
@@ -60,6 +91,11 @@ defmodule LiveCeci.RouterTest do
   end
 
   describe "static files" do
+    # Plug.Static has NO :index option — the word does not appear in its source — so a
+    # request for "/" falls through it to plug :match and the explicit route. An audit
+    # called that route dead code shadowed by Static and deleting it turned the front page
+    # into a 404. This test is what caught it, and it pins the behaviour so the same
+    # reasoning cannot be reached twice.
     test "/ serves the client" do
       conn = call(conn(:get, "/"))
 
