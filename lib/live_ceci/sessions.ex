@@ -38,9 +38,7 @@ defmodule LiveCeci.Sessions do
 
   require Logger
 
-  # One line in twenty. Enough to see that refusals are happening and roughly how often,
-  # without the storm paying for itself.
-  @log_one_in 20
+  @report_every_ms 30_000
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -97,55 +95,60 @@ defmodule LiveCeci.Sessions do
   # ---------------------------------------------------------------- server
 
   @impl GenServer
-  def init(_opts), do: {:ok, %{}}
+  def init(_opts) do
+    schedule_report()
+    {:ok, %{holders: %{}, refused: 0}}
+  end
 
   @impl GenServer
-  def handle_call({:join, address}, {pid, _tag}, holders) do
-    cond do
-      map_size(holders) >= max_total() ->
-        refuse(holders, "#{max_total()} sessions already live")
+  def handle_call({:join, address}, {pid, _tag}, state) do
+    %{holders: holders} = state
 
-      count_for(holders, address) >= max_per_address() ->
-        refuse(holders, "#{max_per_address()} already live from #{:inet.ntoa(address)}")
+    cond do
+      map_size(holders) >= max_total() or count_for(holders, address) >= max_per_address() ->
+        # A counter, not a log line. See the moduledoc: this runs serialised in front of
+        # every other upgrade, and anything that touches I/O here is paid for by whoever
+        # is next in the queue.
+        {:reply, {:error, :too_many_sessions}, %{state | refused: state.refused + 1}}
 
       true ->
         Process.monitor(pid)
-        {:reply, :ok, Map.put(holders, pid, address)}
+        {:reply, :ok, %{state | holders: Map.put(holders, pid, address)}}
     end
   end
 
-  def handle_call({:available?, address}, _from, holders) do
+  def handle_call({:available?, address}, _from, %{holders: holders} = state) do
     free = map_size(holders) < max_total() and count_for(holders, address) < max_per_address()
-    {:reply, free, holders}
+    {:reply, free, state}
   end
 
-  def handle_call(:total, _from, holders), do: {:reply, map_size(holders), holders}
+  def handle_call(:total, _from, state), do: {:reply, map_size(state.holders), state}
 
-  def handle_call({:per_address, address}, _from, holders),
-    do: {:reply, count_for(holders, address), holders}
-
-  # Reply, THEN log. handle_continue/2 runs after the reply is sent, so the logging
-  # backend is no longer between a refused caller and the next one waiting.
-  defp refuse(holders, why) do
-    {:reply, {:error, :too_many_sessions}, holders, {:continue, {:refused, why}}}
-  end
+  def handle_call({:per_address, address}, _from, state),
+    do: {:reply, count_for(state.holders, address), state}
 
   @impl GenServer
-  def handle_continue({:refused, why}, holders) do
-    # Sampled. A refusal storm is exactly when logging is most expensive and least
-    # informative: the hundredth identical line says nothing the first did not, and
-    # writing it costs the next caller their place in the queue.
-    if :rand.uniform(@log_one_in) == 1 do
-      Logger.warning("refusing session: #{why}")
-    end
-
-    {:noreply, holders}
+  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
+    {:noreply, %{state | holders: Map.delete(state.holders, pid)}}
   end
 
-  @impl GenServer
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, holders) do
-    {:noreply, Map.delete(holders, pid)}
+  # The only place this module logs. Off the call path entirely: a timer, not a caller.
+  def handle_info(:report, %{refused: 0} = state) do
+    schedule_report()
+    {:noreply, state}
   end
+
+  def handle_info(:report, state) do
+    Logger.warning(
+      "refused #{state.refused} session(s) in the last #{div(@report_every_ms, 1000)}s; " <>
+        "#{map_size(state.holders)} live, cap #{max_total()}"
+    )
+
+    schedule_report()
+    {:noreply, %{state | refused: 0}}
+  end
+
+  defp schedule_report, do: Process.send_after(self(), :report, @report_every_ms)
 
   defp count_for(holders, address) do
     Enum.count(holders, fn {_pid, held} -> held == address end)
