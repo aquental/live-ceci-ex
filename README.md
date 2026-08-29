@@ -105,7 +105,7 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `lib/live_ceci/provider/gemini.ex` | Gemini Live, through `gemini_ex` |
 | `lib/live_ceci/provider/grok.ex` | xAI's Voice Agent, hand-rolled on `websockex` — no Elixir package speaks the OpenAI Realtime protocol |
 | `lib/live_ceci/live_session.ex` | the one upstream Gemini call, with its own timeout and `catch :exit` — a stalled session must not take the listener down |
-| `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written |
+| `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written — including whether manual turn detection beats server VAD |
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `lib/live_ceci/tools.ex` | `play_playlist` / `play_track` / `skip` / `pause` — they return **instantly**, so the voice never stalls |
 | `lib/live_ceci/persona.ex` · `priv/assets/mira_persona.txt` | who Mira is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |

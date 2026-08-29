@@ -130,6 +130,7 @@ defmodule GrokSpike do
     probe_text_turn(ws)
     probe_binary_input(ws)
     probe_tool_call(ws)
+    probe_manual_turn(ws)
     summary()
   end
 
@@ -283,6 +284,183 @@ defmodule GrokSpike do
 
       _ ->
         fail("5. tool call", "model never called a tool — check the declarations shape")
+    end
+  end
+
+  # ---- manual turn detection --------------------------------------------------
+  #
+  # Documented at docs.x.ai: turn_detection.type accepts "server_vad" or null, and
+  # `input_audio_buffer.commit` "is only available when turn_detection type is null".
+  # So the manual path exists. The question these two probes answer is whether it is
+  # FASTER, which the docs do not say and cannot say — with server VAD the model waits
+  # silence_duration_ms before it will admit the turn ended, and with manual turns that
+  # wait is replaced by whatever the client's own VAD decides.
+  #
+  # Both halves stream the SAME audio at the same pace, and both start the clock at the
+  # last frame of speech. The only difference is what happens next: padding silence and
+  # waiting, versus commit + response.create immediately.
+
+  @silence_frame :binary.copy(<<0, 0>>, 1600)
+
+  defp probe_manual_turn(ws) do
+    case Process.get(:her_voice) do
+      nil ->
+        warn("8. manual turn accepted", "skipped — no captured audio to send")
+        warn("9. manual vs server_vad", "skipped — no captured audio to send")
+
+      pcm24 ->
+        pcm16 = downsample_24k_to_16k(pcm24)
+
+        vad_ms = measure_server_vad(ws, pcm16)
+
+        if switch_turn_detection(ws, nil) do
+          measure_manual(ws, pcm16, vad_ms)
+        end
+    end
+  end
+
+  # Probe 8 on its own: does the server take a null type at all? A rejection here ends
+  # the question, and it is worth telling apart from "accepted but no faster".
+  defp switch_turn_detection(ws, nil) do
+    drain(300)
+    send_json(ws, %{type: "session.update", session: %{turn_detection: %{type: nil}}})
+
+    case wait_for(["session.updated", "error"], 10_000) do
+      %{"type" => "session.updated"} ->
+        ok("8. manual turn accepted", ~s(turn_detection.type = null, mid-session))
+        true
+
+      %{"type" => "error"} = e ->
+        fail("8. manual turn accepted", inspect(Map.get(e, "error", e)))
+        false
+
+      nil ->
+        warn("8. manual turn accepted", "no ack either way")
+        false
+    end
+  end
+
+  defp switch_turn_detection(ws, :server_vad) do
+    drain(300)
+
+    send_json(ws, %{
+      type: "session.update",
+      session: %{turn_detection: %{type: "server_vad", silence_duration_ms: 500}}
+    })
+
+    wait_for(["session.updated", "error"], 10_000)
+  end
+
+  defp measure_server_vad(ws, pcm16) do
+    switch_turn_detection(ws, :server_vad)
+    settle()
+    stream_speech(ws, pcm16)
+    t0 = now()
+    flush()
+
+    # The browser never stops sending; the VAD needs to hear the silence to close the
+    # turn. Padding continues WHILE waiting, so audio that arrives mid-pad is timed when
+    # it arrives rather than after the padding loop finishes.
+    case await_audio_padding(ws, 30) do
+      nil ->
+        fail("9. manual vs server_vad", "server_vad produced no audio — nothing to compare")
+        nil
+
+      _ ->
+        now() - t0
+    end
+  end
+
+  defp measure_manual(ws, pcm16, vad_ms) do
+    settle()
+    stream_speech(ws, pcm16)
+    t0 = now()
+    flush()
+
+    # No padding and no waiting: the turn is over because we say it is.
+    send_json(ws, %{type: "input_audio_buffer.commit"})
+    send_json(ws, %{type: "response.create"})
+
+    case wait_for_audio(20_000) do
+      nil ->
+        fail("9. manual vs server_vad", "commit + response.create produced no audio in 20 s")
+
+      _ ->
+        manual_ms = now() - t0
+        verdict(manual_ms, vad_ms)
+    end
+  end
+
+  # The first run of this probe reported server_vad at 0 ms, which is not a fast model:
+  # it is Mira still talking from probe 6, plus whatever she said mid-utterance when her
+  # own voice was streamed back at her. Both are answers to an EARLIER turn sitting in
+  # the mailbox. settle/0 and flush/0 remove them; this clause exists because if they
+  # ever stop working, an impossible number must read as broken and not as a result.
+  defp verdict(_manual_ms, vad_ms) when is_integer(vad_ms) and vad_ms < 200 do
+    fail(
+      "9. manual vs server_vad",
+      "server_vad answered in #{vad_ms} ms — that is leftover audio, not a turn. Discarded."
+    )
+  end
+
+  defp verdict(manual_ms, nil) do
+    warn("9. manual vs server_vad", "manual #{manual_ms} ms; no server_vad number to compare")
+  end
+
+  defp verdict(manual_ms, vad_ms) do
+    saved = vad_ms - manual_ms
+    detail = "manual #{manual_ms} ms vs server_vad #{vad_ms} ms (#{saved} ms)"
+
+    # One sample each. It answers "is this worth building", not "how much faster".
+    if saved > 150 do
+      ok("9. manual vs server_vad", detail <> " — worth wiring into the provider")
+    else
+      warn("9. manual vs server_vad", detail <> " — not obviously worth the false-turn risk")
+    end
+  end
+
+  # Waits for a gap rather than a fixed delay: whatever she was saying has to actually
+  # finish, and a 4 s response outlasts any constant worth hardcoding.
+  defp settle, do: drain(1_200)
+
+  defp flush do
+    receive do
+      _ -> flush()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp stream_speech(ws, pcm16) do
+    for <<chunk::binary-3200 <- pcm16>> do
+      WebSockex.send_frame(ws, {:binary, chunk})
+      Process.sleep(100)
+    end
+  end
+
+  defp await_audio_padding(_ws, 0), do: wait_for_audio(15_000)
+
+  defp await_audio_padding(ws, pads_left) do
+    case check_audio() do
+      nil ->
+        WebSockex.send_frame(ws, {:binary, @silence_frame})
+        Process.sleep(100)
+        await_audio_padding(ws, pads_left - 1)
+
+      found ->
+        found
+    end
+  end
+
+  # Non-blocking peek. Non-audio events are consumed rather than requeued — nothing
+  # after this point reads them, and leaving them would make the next drain/300 lie.
+  defp check_audio do
+    receive do
+      {:grok_binary, _t, bin} -> {:binary, bin}
+      {:grok, _t, %{"type" => "response.output_audio.delta", "delta" => b64}} -> {:json, b64}
+      {:grok, _t, _} -> check_audio()
+    after
+      0 -> nil
     end
   end
 
