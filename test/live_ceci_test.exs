@@ -35,12 +35,49 @@ defmodule LiveCeciTest do
     end
   end
 
-  describe "config/0 latency knobs" do
-    test "both knobs are present and inside the range runtime.exs accepts" do
-      assert %{silence_duration_ms: silence, frame_samples: frame} = LiveCeci.config()
+  describe "the test environment is sealed off from the machine" do
+    # config/runtime.exs runs AFTER config/test.exs, so anything it reads from the
+    # environment silently outranks what the test config declared. It used to read a
+    # developer's .env in every environment, and two things leaked through:
+    #
+    #   PORT=8000            beat `config :live_ceci, port: 0`
+    #   GOOGLE_API_KEY=...   beat `config :gemini_ex, api_key: "test-key"`,
+    #                        so `mix test` ran with the real credential in app env
+    #
+    # Every assertion below pins an EXACT literal, on purpose. The tests that used to
+    # cover these knobs asserted only type and range — `is_integer(silence) and silence
+    # in 0..10_000` — and a leaked 300 satisfies that as happily as the default 400.
+    # That is why the port was the only leak anyone noticed: it was the only one pinned.
 
-      assert is_integer(silence) and silence in 0..10_000
-      assert is_integer(frame) and frame in 160..16_000
+    test "the API key is the test one, never a real credential from .env or the shell" do
+      # The sharpest of these. A real key here means the suite is one accidental network
+      # call away from spending someone's quota, and one inspect/1 away from logging it.
+      #
+      # The custom message is not decoration. A bare `assert key == "test-key"` prints
+      # ExUnit's left/right diff on failure — which is to say it prints the real key, to
+      # the terminal and to CI output. A test guarding against a leaked credential must
+      # not be the thing that leaks it. Verified: this failure names the length, not
+      # the key.
+      key = Application.get_env(:gemini_ex, :api_key)
+
+      assert key == "test-key",
+             "the test env holds a #{byte_size(to_string(key))}-byte key that is not " <>
+               "the test one — .env or the shell leaked a real credential into mix test"
+    end
+
+    test "the port comes from config/test.exs, so the suite never fights the dev server" do
+      assert LiveCeci.config().port == 0
+    end
+
+    test "the voice, language and latency knobs are the compiled defaults" do
+      # These differ from the values in the repo's own .env (luna / pt-BR / 300 / 1500),
+      # which is exactly what makes them a leak detector rather than a tautology.
+      assert %{
+               voice: "eve",
+               language: nil,
+               silence_duration_ms: 400,
+               frame_samples: 1600
+             } = LiveCeci.config()
     end
   end
 

@@ -3,9 +3,20 @@ import Config
 # A ten-line dotenv reader, so a `.env` beside the project works and we skip a
 # dependency for it. Real deployments set the environment directly; this only fills
 # in variables that aren't already set.
+#
+# NEVER in :test. This file runs AFTER config/test.exs, so anything it puts in the
+# environment silently outranks what the test config declared. Two things went wrong
+# before the guard existed, both invisible until something asserted on them:
+#
+#   * PORT=8000 in .env overrode `config :live_ceci, port: 0`, which test.exs sets
+#     precisely so the suite does not fight the dev server for a port.
+#   * GOOGLE_API_KEY in .env overrode `config :gemini_ex, api_key: "test-key"`, so
+#     `mix test` ran with the developer's REAL key sitting in application env.
+#
+# The rule underneath both: a test run must not depend on what is on the machine.
 env_file = Path.expand("../.env", __DIR__)
 
-if File.exists?(env_file) do
+if config_env() != :test and File.exists?(env_file) do
   env_file
   |> File.stream!()
   |> Enum.each(fn line ->
@@ -20,12 +31,16 @@ if File.exists?(env_file) do
 end
 
 # gemini_ex reads GEMINI_API_KEY; AI Studio hands you a GOOGLE_API_KEY. Accept both.
-api_key = System.get_env("GEMINI_API_KEY") || System.get_env("GOOGLE_API_KEY")
+#
+# Skipped entirely in :test, not just when unset. Not loading .env is not enough on its
+# own — an exported GOOGLE_API_KEY in the shell reaches here the same way, and the test
+# environment has no business holding a real credential. config/test.exs owns the value.
+if config_env() != :test do
+  api_key = System.get_env("GEMINI_API_KEY") || System.get_env("GOOGLE_API_KEY")
 
-if api_key do
-  config :gemini_ex, api_key: api_key
-else
-  if config_env() != :test do
+  if api_key do
+    config :gemini_ex, api_key: api_key
+  else
     IO.warn("""
     No API key found. Set GOOGLE_API_KEY (or GEMINI_API_KEY) in .env or the environment.
     Get one from AI Studio — the Gemini Developer API, not Vertex.
@@ -35,10 +50,11 @@ end
 
 # PORT wins, then whatever config/{env}.exs set — same fallback the two above use.
 # Hardcoding 8000 here made config/test.exs unable to move the port at all.
+# Same guard: in :test the port comes from config/test.exs and nowhere else.
 port =
-  case System.get_env("PORT") do
-    nil -> Application.get_env(:live_ceci, :port)
-    value -> String.to_integer(value)
+  case config_env() != :test && System.get_env("PORT") do
+    value when is_binary(value) -> String.to_integer(value)
+    _ -> Application.get_env(:live_ceci, :port)
   end
 
 # MODEL picks the backend. Read here rather than baked in at compile time, so
