@@ -96,10 +96,31 @@ defmodule LiveCeci.TicketsTest do
     test "the global bound evicts the oldest rather than refusing the newest" do
       # The backstop, and the direction matters: refusing the newcomer is what let
       # whoever arrived first keep the door shut.
+      #
+      # Driven from application env rather than the default, so the test states the
+      # relationship it is checking instead of tracking whatever the default happens to
+      # be this month.
+      Application.put_env(:live_ceci, :max_tickets, 200)
+      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets) end)
+
       for i <- 1..250, do: Tickets.issue({10, 0, div(i, 256), rem(i, 256)})
 
       assert Tickets.outstanding() <= 200
       assert {:ok, _} = Tickets.issue({192, 168, 1, 1})
+    end
+
+    test "the global bound stays far enough above the per-address one to not evict live tickets" do
+      # The trap behind raising MAX_TICKETS_PER_ADDRESS: eviction protects the table, and
+      # if the two bounds are close it starts protecting it from legitimate tickets.
+      # Measured at per-address 150 with a global of 200 — two addresses filled the table
+      # and 100 of the first one's 150 were evicted before their owners could present
+      # them, which is a 403 on a ticket the server had just handed out.
+      per_address = Application.get_env(:live_ceci, :max_tickets_per_address, 150)
+      global = Application.get_env(:live_ceci, :max_tickets, 1_000)
+
+      assert global >= per_address * 4,
+             "MAX_TICKETS (#{global}) is too close to MAX_TICKETS_PER_ADDRESS " <>
+               "(#{per_address}) — eviction will start discarding unused tickets"
     end
   end
 

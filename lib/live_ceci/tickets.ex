@@ -35,7 +35,7 @@ defmodule LiveCeci.Tickets do
 
   ## The bound, and the denial of service it used to be
 
-  `@max_outstanding` stops an unauthenticated endpoint growing a table without end. The
+  `MAX_TICKETS` stops an unauthenticated endpoint growing a table without end. The
   first version enforced it globally and refused the NEWEST request, which turned a
   memory bound into an availability weapon: 200 mints from one address filled the table
   and every other user got `{:error, :too_many}` — reproduced, not theorised. It cleared
@@ -44,7 +44,7 @@ defmodule LiveCeci.Tickets do
 
   Two changes fix it, and both matter:
 
-    * **Per address.** One address can hold `@max_per_address` at a time and no more, so
+    * **Per address.** One address can hold `MAX_TICKETS_PER_ADDRESS` at a time and no more, so
       filling the table from one place is no longer possible.
     * **Evict oldest.** If the table is somehow still full, the oldest ticket goes rather
       than the newest being refused. A ticket already near its expiry is worth less than
@@ -58,7 +58,6 @@ defmodule LiveCeci.Tickets do
 
   @table __MODULE__
   @ttl_ms 30_000
-  @max_outstanding 200
   @sweep_every_ms 60_000
 
   # 32 bytes. Long enough that guessing is not a strategy, short enough for a URL.
@@ -90,7 +89,7 @@ defmodule LiveCeci.Tickets do
         # Global backstop. Evicts rather than refuses: the newest request is worth more
         # than the ticket closest to expiring anyway, and refusing it is what let whoever
         # arrived first lock the door behind them.
-        if :ets.info(@table, :size) >= @max_outstanding, do: evict_oldest()
+        if :ets.info(@table, :size) >= max_outstanding(), do: evict_oldest()
 
         ticket = @bytes |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
         :ets.insert(@table, {ticket, now() + @ttl_ms, address})
@@ -108,7 +107,14 @@ defmodule LiveCeci.Tickets do
   # becomes the ceiling on concurrent users regardless of MAX_SESSIONS — demonstrated by
   # priv/spike/load_test.exs, where 50 simultaneous clients from 127.0.0.1 got 22
   # connections and 28 refusals with max_sessions set to 100.
-  defp max_per_address, do: Application.get_env(:live_ceci, :max_tickets_per_address, 20)
+  defp max_per_address, do: Application.get_env(:live_ceci, :max_tickets_per_address, 150)
+
+  # Must stay comfortably ABOVE max_per_address, or the eviction that protects the table
+  # starts throwing away tickets that were just issued and have not been used yet.
+  # Measured with per-address at 150 and this at 200: two addresses filled the table and
+  # 100 of the first address's 150 tickets were evicted before their owners could present
+  # them — a 403 on a ticket the server had just handed out.
+  defp max_outstanding, do: Application.get_env(:live_ceci, :max_tickets, 1_000)
 
   defp count_for(address) do
     :ets.select_count(@table, [{{:_, :_, :"$1"}, [{:==, :"$1", {:const, address}}], [true]}])
@@ -164,7 +170,7 @@ defmodule LiveCeci.Tickets do
   # version of the fix rather than a rewrite — it removes O(table) work from a path that
   # never needed it, without pretending there was a problem to solve.
   defp maybe_sweep do
-    if :ets.info(@table, :size) > div(@max_outstanding, 2), do: sweep()
+    if :ets.info(@table, :size) > div(max_outstanding(), 2), do: sweep()
   end
 
   @doc false
