@@ -154,7 +154,7 @@ defmodule LatencyBench do
 
     t_connect = mono()
 
-    case LatencyBench.Client.start("ws://127.0.0.1:#{port}/ws", self()) do
+    case LatencyBench.Client.start("ws://127.0.0.1:#{port}/ws?ticket=#{ticket(port)}", self()) do
       {:ok, ws} ->
         connect_ms = mono() - t_connect
         Process.sleep(@session_grace_ms)
@@ -400,8 +400,25 @@ defmodule LatencyBench do
 
   # ---- plumbing ----------------------------------------------------------------
 
+  # /ws needs a single-use ticket now, so every trial mints one. A browser gets this for
+  # free from fetch(); here it is one :httpc call, and it is the same Origin the client
+  # sends on the upgrade.
+  defp ticket(port) do
+    request =
+      {~c"http://127.0.0.1:#{port}/ws-ticket", [{~c"Origin", ~c"http://127.0.0.1"}], ~c"text/plain",
+       ~c""}
+
+    case :httpc.request(:post, request, [], []) do
+      {:ok, {{_, 200, _}, _headers, body}} ->
+        body |> to_string() |> Jason.decode!() |> Map.fetch!("ticket")
+
+      other ->
+        die("could not get a /ws ticket: #{inspect(other)}")
+    end
+  end
+
   defp start_apps do
-    for app <- [:jason, :websockex, :bandit, :gemini_ex] do
+    for app <- [:jason, :inets, :websockex, :bandit, :gemini_ex] do
       {:ok, _} = Application.ensure_all_started(app)
     end
   end

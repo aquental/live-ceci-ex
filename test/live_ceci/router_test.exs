@@ -9,9 +9,24 @@ defmodule LiveCeci.RouterTest do
 
   # The RFC6455 handshake headers WebSockAdapter validates before upgrading. "host" has to
   # go in directly: Plug.Conn.put_req_header/3 refuses it, but the validation reads the header.
-  defp ws_conn(origin \\ "http://localhost:8000") do
+  # A real ticket by default: the Origin tests are about Origin, and a missing ticket
+  # would make them pass for the wrong reason.
+  defp ws_conn(origin \\ "http://localhost:8000", ticket \\ :valid) do
+    query =
+      case ticket do
+        :valid ->
+          {:ok, t} = LiveCeci.Tickets.issue({127, 0, 0, 1})
+          "?ticket=#{t}"
+
+        :none ->
+          ""
+
+        other ->
+          "?ticket=#{other}"
+      end
+
     conn =
-      conn(:get, "/ws")
+      conn(:get, "/ws" <> query)
       |> put_req_header("connection", "upgrade")
       |> put_req_header("upgrade", "websocket")
       |> put_req_header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
@@ -19,6 +34,53 @@ defmodule LiveCeci.RouterTest do
 
     conn = if origin, do: put_req_header(conn, "origin", origin), else: conn
     %{conn | req_headers: [{"host", "localhost"} | conn.req_headers]}
+  end
+
+  describe "the ticket on /ws" do
+    # The Origin check stops another SITE opening a session. It stops nothing that speaks
+    # HTTP directly, because Origin is a header and a non-browser picks what it sends.
+    # The ticket is the part that requires having asked first.
+
+    test "an upgrade with no ticket is refused" do
+      assert call(ws_conn("http://localhost:8000", :none)).status == 403
+    end
+
+    test "an invented ticket is refused" do
+      assert call(ws_conn("http://localhost:8000", "not-a-real-ticket")).status == 403
+    end
+
+    test "a ticket works exactly once" do
+      # The property that makes a leaked query string survivable. :ets.take/2 is what
+      # makes it atomic, so two connections racing on one ticket cannot both win.
+      {:ok, ticket} = LiveCeci.Tickets.issue({127, 0, 0, 1})
+
+      refute call(ws_conn("http://localhost:8000", ticket)).status == 403
+      assert call(ws_conn("http://localhost:8000", ticket)).status == 403
+    end
+
+    test "a ticket minted for another address is refused" do
+      # Nearly free on loopback; it starts mattering the moment BIND_IP opens up, which
+      # is exactly when nobody remembers to add it.
+      {:ok, ticket} = LiveCeci.Tickets.issue({10, 0, 0, 7})
+
+      assert call(ws_conn("http://localhost:8000", ticket)).status == 403
+    end
+
+    test "the mint endpoint is behind the same Origin check as the upgrade" do
+      # An endpoint that mints what /ws demands is worth exactly the check in front of it.
+      hostile = conn(:post, "/ws-ticket") |> put_req_header("origin", "https://evil.example")
+      assert call(hostile).status == 403
+
+      ok = conn(:post, "/ws-ticket") |> put_req_header("origin", "http://localhost:8000")
+      conn = call(ok)
+      assert conn.status == 200
+      assert %{"ticket" => t} = Jason.decode!(conn.resp_body)
+      assert byte_size(t) >= 40
+    end
+
+    test "minting with no Origin at all is refused" do
+      assert call(conn(:post, "/ws-ticket")).status == 403
+    end
   end
 
   describe "the Origin check on /ws" do

@@ -7,13 +7,16 @@ defmodule LiveCeci.ApplicationTest do
   # with no test at all, and the things it decides — where the listener binds, how long
   # a write may block — are exactly the ones that are invisible until they are wrong.
 
-  test "one listener, supervised one-for-one" do
-    assert Process.whereis(LiveCeci.Supervisor)
-    # Bandit's child id is {Bandit, ref}, not Bandit — it generates one per listener.
-    assert [{{Bandit, _ref}, pid, :supervisor, [Bandit]}] =
-             Supervisor.which_children(LiveCeci.Supervisor)
+  test "the ticket store starts before the listener that depends on it" do
+    # Order matters: an upgrade arriving before the ETS table exists would crash on it.
+    # which_children/1 returns them in reverse start order.
+    children = Supervisor.which_children(LiveCeci.Supervisor)
 
-    assert Process.alive?(pid)
+    assert [{{Bandit, _ref}, bandit, :supervisor, [Bandit]}, {LiveCeci.Tickets, tickets, _, _}] =
+             children
+
+    assert Process.alive?(bandit)
+    assert Process.alive?(tickets)
   end
 
   test "it binds to loopback unless told otherwise" do
@@ -25,15 +28,18 @@ defmodule LiveCeci.ApplicationTest do
   test "the listener survives a crashing child" do
     # one_for_one, so a dropped call never touches another listener. Killing Bandit is
     # the closest available proxy: the supervisor must bring it back rather than give up.
-    [{_id, pid, _, _}] = Supervisor.which_children(LiveCeci.Supervisor)
+    [{{Bandit, _}, pid, _, _} | _] = Supervisor.which_children(LiveCeci.Supervisor)
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
     assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
 
     assert eventually(fn ->
              case Supervisor.which_children(LiveCeci.Supervisor) do
-               [{_id, new, _, _}] when is_pid(new) -> new != pid and Process.alive?(new)
-               _ -> false
+               [{{Bandit, _}, new, _, _} | _] when is_pid(new) ->
+                 new != pid and Process.alive?(new)
+
+               _ ->
+                 false
              end
            end)
   end

@@ -90,9 +90,28 @@ function stopVoice() {                                                     // ba
 }
 
 // ---------- the live socket ----------
-function connect() {
+// The upgrade cannot carry a credential — new WebSocket(url) takes no headers — so the
+// ticket is fetched over ordinary HTTP first and presented in the query string. It is
+// single-use, so every reconnect needs a fresh one; that is why connect() asks each time
+// rather than caching.
+async function fetchTicket() {
+  const res = await fetch("/ws-ticket", { method: "POST" });
+  if (!res.ok) throw new Error(`ticket refused: ${res.status}`);
+  return (await res.json()).ticket;
+}
+
+async function connect() {
+  let ticket;
+  try {
+    ticket = await fetchTicket();
+  } catch (e) {
+    setStatus("não consegui autorizar a conexão"); setOrb("idle");
+    $("talk").disabled = false; $("talk").textContent = "↻ tentar de novo";
+    console.error(e);
+    return;
+  }
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?ticket=${encodeURIComponent(ticket)}`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { dropped = 0; setStatus("ouvindo…"); setOrb("listening"); };
   ws.onclose = () => {
@@ -167,7 +186,7 @@ async function go() {
   // startMic twice would strand the old graph and re-prompt for the microphone.
   if (!serverConfig) await loadConfig();
   if (!audioCtx) await startMic();
-  connect();
+  await connect();
   $("talk").textContent = "● ao vivo";
 }
 $("talk").addEventListener("click", go);

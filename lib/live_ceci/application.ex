@@ -10,6 +10,9 @@ defmodule LiveCeci.Application do
     bind_ip = Application.get_env(:live_ceci, :bind_ip, {127, 0, 0, 1})
 
     children = [
+      # Before Bandit: the ticket table has to exist before the first upgrade can ask
+      # about it.
+      LiveCeci.Tickets,
       {
         Bandit,
         # ThousandIsland defaults to send_timeout: 30_000 (transports/tcp.ex:24). Thirty

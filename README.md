@@ -109,6 +109,7 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `lib/live_ceci/tools.ex` | `agendar_sessao` / `confirmar_presenca` / `emitir_recibo` / `resumo_mensal` — stubs that return **instantly**, so the voice never stalls, with the operational-only boundary enforced in the parameter schemas rather than only in the prompt |
 | `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
+| `lib/live_ceci/tickets.ex` | single-use tickets for the upgrade — the browser's `new WebSocket(url)` takes no headers, so the credential cannot ride on the upgrade itself |
 | `lib/live_ceci/redact.ex` | `inspect/1` for anything a provider touched — both APIs echo the key back, one in its URL and one in its error text |
 | `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
 | `config/runtime.exs` | the `.env` reader and the API-key aliasing |
@@ -125,7 +126,8 @@ Dependencies, in full: `bandit`, `plug`, `websock_adapter`, `websockex`, `gemini
 | `GET /` · `GET /main.js` · `GET /pcm-processor.js` | the client, served from `priv/frontend` |
 | `GET /healthz` | `200 ok` |
 | `GET /config.json` | `{"frameSamples":N,"silenceMs":N}` — the only channel between `.env` and the AudioWorklet that applies them |
-| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame, **`Origin` checked**: loopback on any port, plus `ALLOWED_ORIGINS`. Everything else, including a missing header, gets 403 |
+| `POST /ws-ticket` | mints a single-use, 30 s, address-bound ticket. Same `Origin` check as `/ws` — an endpoint that mints what `/ws` demands is worth exactly the check in front of it |
+| `GET /ws` | the WebSocket upgrade — 60 s timeout, 1 MB max frame, **`Origin` checked** (loopback on any port, plus `ALLOWED_ORIGINS`) **and ticket checked**. Anything else, including a missing header or ticket, gets 403 |
 
 ## Measuring latency
 

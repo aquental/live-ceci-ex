@@ -69,6 +69,12 @@ defmodule LiveCeci.Router do
 
   def origin_allowed?(_origin), do: false
 
+  # Single use and address-bound, both enforced in LiveCeci.Tickets. A missing ticket is
+  # the same answer as a wrong one.
+  defp ticket_ok?(conn) do
+    LiveCeci.Tickets.consume(conn.query_params["ticket"], conn.remote_ip) == :ok
+  end
+
   # There is deliberately no Plug.Static over priv/assets. It used to serve four mp3s to
   # the music player; with the tools operational, nothing in the browser fetches from
   # there any more — and what remains in that directory is ceci_persona.txt, the system
@@ -82,10 +88,37 @@ defmodule LiveCeci.Router do
   plug :match
   plug :dispatch
 
+  # The ticket is minted here, over ordinary HTTP, because the upgrade cannot carry a
+  # credential: the browser's `new WebSocket(url)` takes no headers. Origin-checked like
+  # /ws itself — an endpoint that mints the thing /ws demands is worth exactly as much as
+  # the check in front of it.
+  post "/ws-ticket" do
+    with [origin] <- get_req_header(conn, "origin"),
+         true <- origin_allowed?(origin),
+         {:ok, ticket} <- LiveCeci.Tickets.issue(conn.remote_ip) do
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(200, Jason.encode!(%{ticket: ticket}))
+      |> halt()
+    else
+      {:error, :too_many} ->
+        conn |> send_resp(503, "too many outstanding tickets") |> halt()
+
+      _rejected ->
+        Logger.warning(
+          "rejected /ws-ticket from origin #{inspect(get_req_header(conn, "origin"))}"
+        )
+
+        conn |> send_resp(403, "forbidden") |> halt()
+    end
+  end
+
   get "/ws" do
+    conn = fetch_query_params(conn)
+
     case get_req_header(conn, "origin") do
       [origin] ->
-        if origin_allowed?(origin) do
+        if origin_allowed?(origin) and ticket_ok?(conn) do
           conn
           |> WebSockAdapter.upgrade(LiveCeci.Socket, [],
             timeout: 60_000,
