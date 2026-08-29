@@ -28,13 +28,40 @@ defmodule LiveCeci.ToolsTest do
                Tools.dispatch("resumo_mensal", %{"mes" => "agosto"})
     end
 
-    test "a missing argument degrades to an empty string rather than crashing the turn" do
-      # The model decides these. A required parameter it forgets must not take the call
-      # down mid-sentence — an incomplete confirmation is recoverable, a crash is not.
-      assert {%{action: "agendar", detail: "M.S."}, _result} =
+    test "a missing argument reports back instead of confirming something that did not happen" do
+      # It used to answer "recibo emitido" with no patient, and Ceci says the result out
+      # loud. No action reaches the browser and the model is told which field to ask for.
+      assert {nil, %{result: "faltou quando — pergunte de novo"}} =
                Tools.dispatch("agendar_sessao", %{"paciente" => "M.S."})
 
-      assert {%{action: "recibo", detail: ""}, _result} = Tools.dispatch("emitir_recibo", %{})
+      assert {nil, %{result: "faltou paciente e valor — pergunte de novo"}} =
+               Tools.dispatch("emitir_recibo", %{})
+    end
+
+    test "a non-string argument neither crashes the call nor corrupts it silently" do
+      # The model decides the values, and `type: "string"` in the schema is a request.
+      # All three of these were measured coming back from a live model shape:
+      #
+      #   a map raised Protocol.UndefinedError on the WebSockex process, killing the call
+      #   a list did NOT raise — Enum.join flattened ["A","B"] into "AB"
+      #   an integer passed through into a field @type declares as String.t()
+      #
+      # The quiet two were the dangerous ones: she confirmed a booking against mangled data.
+      assert {nil, %{result: "faltou paciente" <> _}} =
+               Tools.dispatch("agendar_sessao", %{
+                 "paciente" => %{"iniciais" => "A.B."},
+                 "quando" => "terça"
+               })
+
+      assert {nil, %{result: "faltou paciente" <> _}} =
+               Tools.dispatch("confirmar_presenca", %{
+                 "paciente" => ["A", "B"],
+                 "status" => "faltou"
+               })
+
+      # A number is the one non-string worth keeping: `mes: 8` is a reasonable emission.
+      assert {%{action: "resumo", detail: "8"}, _result} =
+               Tools.dispatch("resumo_mensal", %{"mes" => 8})
     end
 
     test "atom-keyed args work too" do
@@ -111,7 +138,14 @@ defmodule LiveCeci.ToolsTest do
     end
 
     # Reductions are immune to machine load, so this half never flakes.
-    @budget_reductions 60
+    #
+    # Measured after the argument-coercion fix: 64, 64, 66, 16 for the four clauses, and
+    # 69 for the worst case (every required argument missing, so `complete/2` builds the
+    # error). 90 is deliberately tight rather than round. The reference offender in the
+    # comment above — File.read! of a small file — costs about 40, so this headroom is
+    # smaller than the cheapest thing the test exists to catch. Raising it to a
+    # comfortable 150 would let a file read slip through unnoticed.
+    @budget_reductions 90
 
     test "no tool does real work" do
       for {name, args} <- @cases do
@@ -137,10 +171,29 @@ defmodule LiveCeci.ToolsTest do
       # The failure this catches: renaming a tool in @declarations and not in dispatch/2.
       # Both compile, and the only symptom is the model calling a tool that answers
       # "unknown tool" while she cheerfully says it is done.
+      #
+      # Called with no arguments on purpose. Most clauses now refuse and report a missing
+      # field, which is a different answer from falling through to the unknown clause —
+      # and telling those two apart is exactly the point.
       for %{name: name} <- Tools.declarations() do
-        assert {command, %{result: result}} = Tools.dispatch(name, %{})
-        assert command != nil, "#{name} is declared but falls through to the unknown clause"
-        refute result =~ "unknown tool"
+        assert {_command, %{result: result}} = Tools.dispatch(name, %{})
+
+        refute result =~ "unknown tool",
+               "#{name} is declared but falls through to the unknown clause"
+      end
+    end
+
+    test "every declared tool emits an action when its arguments are complete" do
+      complete = %{
+        "agendar_sessao" => %{"paciente" => "M.S.", "quando" => "terça"},
+        "confirmar_presenca" => %{"paciente" => "M.S.", "status" => "compareceu"},
+        "emitir_recibo" => %{"paciente" => "M.S.", "valor" => "250"},
+        "resumo_mensal" => %{"mes" => "agosto"}
+      }
+
+      for %{name: name} <- Tools.declarations() do
+        args = Map.fetch!(complete, name)
+        assert {%{action: _}, %{result: _}} = Tools.dispatch(name, args)
       end
     end
 

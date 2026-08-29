@@ -116,30 +116,51 @@ defmodule LiveCeci.Tools do
     paciente = arg(args, :paciente)
     quando = arg(args, :quando)
 
-    {%{action: "agendar", detail: join([paciente, quando])},
-     %{result: "sessão agendada para #{quando}"}}
+    complete([paciente: paciente, quando: quando], fn ->
+      {%{action: "agendar", detail: join([paciente, quando])},
+       %{result: "sessão agendada para #{quando}"}}
+    end)
   end
 
   def dispatch("confirmar_presenca", args) do
     paciente = arg(args, :paciente)
     status = arg(args, :status)
 
-    {%{action: "presenca", detail: join([paciente, status])}, %{result: "presença: #{status}"}}
+    complete([paciente: paciente, status: status], fn ->
+      {%{action: "presenca", detail: join([paciente, status])}, %{result: "presença: #{status}"}}
+    end)
   end
 
   def dispatch("emitir_recibo", args) do
     paciente = arg(args, :paciente)
     valor = arg(args, :valor)
 
-    {%{action: "recibo", detail: join([paciente, money(valor)])}, %{result: "recibo emitido"}}
+    complete([paciente: paciente, valor: valor], fn ->
+      {%{action: "recibo", detail: join([paciente, money(valor)])}, %{result: "recibo emitido"}}
+    end)
   end
 
+  # The only tool with nothing required: "fecha o resumo" with no month is a fair request.
   def dispatch("resumo_mensal", args) do
     mes = arg(args, :mes)
     {%{action: "resumo", detail: mes}, %{result: "resumo fechado"}}
   end
 
   def dispatch(name, _args), do: {nil, %{result: "unknown tool: #{name}"}}
+
+  # Runs the tool only if every required argument survived coercion.
+  #
+  # This is the half that matters. Coercing a map to "" stops the crash, but it used to
+  # leave `emitir_recibo` answering "recibo emitido" with no patient, and Ceci says that
+  # out loud. Emitting no action and naming the missing field lets her ask again, which
+  # is what a person would do. A confirmation for something that did not happen is worse
+  # than an error.
+  defp complete(required, run) do
+    case for({field, ""} <- required, do: field) do
+      [] -> run.()
+      missing -> {nil, %{result: "faltou #{Enum.join(missing, " e ")} — pergunte de novo"}}
+    end
+  end
 
   # The model decides these keys, so they arrive as strings from JSON and as atoms from
   # gemini_ex's structs. Both, or an empty string — never a crash on the voice path.
@@ -149,10 +170,31 @@ defmodule LiveCeci.Tools do
   # a literal from the line above, so it was never an exhaustion risk, but the shape
   # invites one the first time somebody passes it a key the model chose.
   defp arg(args, key) when is_map(args) and is_atom(key) do
-    args[key] || args[Atom.to_string(key)] || ""
+    args
+    |> Map.get(key, Map.get(args, Atom.to_string(key)))
+    |> coerce()
   end
 
   defp arg(_args, _key), do: ""
+
+  # The model decides the VALUES too, and it does not always send a string. Declaring a
+  # parameter `type: "string"` is a request, not a guarantee. Three shapes were measured
+  # reaching here:
+  #
+  #   %{"iniciais" => "A.B."}  raised Protocol.UndefinedError in join/1 — on the WebSockex
+  #                            process for Grok, inside gemini_ex's Session for Gemini.
+  #                            Either way the live call dies mid-sentence, steerable by
+  #                            anyone with a microphone.
+  #   ["A", "B"]               did NOT raise. Enum.join flattened it to "AB" and Ceci
+  #                            confirmed a booking out loud against a mangled name.
+  #   8                        passed straight through into a field @type calls String.t().
+  #
+  # The silent two are worse than the crash. Numbers coerce, because a model emitting
+  # `mes: 8` is being reasonable; anything structural becomes "" and the caller reports
+  # it rather than guessing what was meant.
+  defp coerce(value) when is_binary(value), do: value
+  defp coerce(value) when is_integer(value) or is_float(value), do: to_string(value)
+  defp coerce(_other), do: ""
 
   # arg/2 returns "" and never nil, so `valor && ...` here was dead truthiness the
   # compiler is right to reject.
