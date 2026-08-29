@@ -9,8 +9,8 @@ defmodule LiveCeci.Router do
 
   use Plug.Router
 
-  # Mira's four dream-pop tracks and the catalogue the browser fetches. `only:` is an
-  # allowlist, not a blocklist, because priv/assets also holds mira_persona.txt — the
+  # Ceci's four dream-pop tracks and the catalogue the browser fetches. `only:` is an
+  # allowlist, not a blocklist, because priv/assets also holds ceci_persona.txt — the
   # system prompt, which only the compiler reads. Anything added here stays private
   # until it is named on this line.
   plug Plug.Static, at: "/assets", from: {:live_ceci, "priv/assets"}, only: ~w(tracks tracks.json)

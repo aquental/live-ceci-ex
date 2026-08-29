@@ -13,7 +13,7 @@ defmodule LiveCeci.Provider do
 
       {:provider, {:voice, pcm}}                       # 24 kHz s16le, already decoded
       {:provider, :interrupted}                        # drop whatever audio is queued
-      {:provider, {:transcript, :user | :mira, text}}
+      {:provider, {:transcript, :user | :ceci, text}}
       {:provider, {:play, command}}                    # a tool decided a player command
       {:provider, {:error, reason}}
       {:provider, {:closed, reason}}

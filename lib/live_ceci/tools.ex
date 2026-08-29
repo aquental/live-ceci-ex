@@ -1,6 +1,6 @@
 defmodule LiveCeci.Tools do
   @moduledoc """
-  Music-control tools for Mira.
+  Music-control tools for Ceci.
 
   The whole lesson of these tools: in a live session, function calls are SYNCHRONOUS —
   the model's voice pauses until the tool returns. So each handler does the minimum

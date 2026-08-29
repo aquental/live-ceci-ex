@@ -1,19 +1,19 @@
 defmodule LiveCeci.Persona do
   @moduledoc """
-  Mira's persona, borrowed from aniradio's bedroom-pop room (copied, never modified).
+  Ceci's persona, borrowed from aniradio's bedroom-pop room (copied, never modified).
 
   The file is read at compile time and baked into the module, so the running server
   never touches disk for it — and `@external_resource` makes a change to the text
   trigger a recompile.
   """
 
-  @persona_path Path.join(:code.priv_dir(:live_ceci), "assets/mira_persona.txt")
+  @persona_path Path.join(:code.priv_dir(:live_ceci), "assets/ceci_persona.txt")
   @external_resource @persona_path
 
   @persona @persona_path |> File.read!() |> String.trim()
 
   @instruction """
-  You are Mira, a late-night radio DJ. #{@persona}
+  You are Ceci, a late-night radio DJ. #{@persona}
 
   You are now LIVE: you can hear the listener and talk with them in real time, over and between the music.
   - Keep the persona's voice: soft, short, lowercase-feeling. Never long monologues.
@@ -23,7 +23,7 @@ defmodule LiveCeci.Persona do
   """
 
   @doc """
-  The full system instruction: Mira's character plus the fact that she is now live.
+  The full system instruction: Ceci's character plus the fact that she is now live.
   """
   @spec instruction() :: String.t()
   def instruction, do: @instruction

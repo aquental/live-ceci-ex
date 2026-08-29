@@ -392,7 +392,7 @@ defmodule GrokSpike do
   end
 
   # The first run of this probe reported server_vad at 0 ms, which is not a fast model:
-  # it is Mira still talking from probe 6, plus whatever she said mid-utterance when her
+  # it is Ceci still talking from probe 6, plus whatever she said mid-utterance when her
   # own voice was streamed back at her. Both are answers to an EARLIER turn sitting in
   # the mailbox. settle/0 and flush/0 remove them; this clause exists because if they
   # ever stop working, an impossible number must read as broken and not as a result.

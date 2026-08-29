@@ -52,11 +52,11 @@ defmodule LiveCeci.SocketTest do
                Jason.decode!(json)
     end
 
-    test "a model transcript is labelled as mira" do
+    test "a model transcript is labelled as ceci" do
       assert {:push, [{:text, json}], _state} =
-               Socket.handle_info({:provider, {:transcript, :mira, "sure"}}, state())
+               Socket.handle_info({:provider, {:transcript, :ceci, "sure"}}, state())
 
-      assert %{"type" => "transcript", "role" => "mira", "text" => "sure"} = Jason.decode!(json)
+      assert %{"type" => "transcript", "role" => "ceci", "text" => "sure"} = Jason.decode!(json)
     end
   end
 

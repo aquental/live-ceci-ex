@@ -93,12 +93,12 @@ defmodule LiveCeci.Provider.GeminiTest do
   end
 
   describe "transcripts" do
-    test "input is tagged :user, output is tagged :mira" do
+    test "input is tagged :user, output is tagged :ceci" do
       Subject.translate_transcript({:input, %{"text" => "play something"}}, self())
       assert_received {:provider, {:transcript, :user, "play something"}}
 
       Subject.translate_transcript({:output, %{"text" => "sure"}}, self())
-      assert_received {:provider, {:transcript, :mira, "sure"}}
+      assert_received {:provider, {:transcript, :ceci, "sure"}}
     end
 
     test "empty transcripts are dropped rather than drawn as blank lines" do

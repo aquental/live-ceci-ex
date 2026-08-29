@@ -70,7 +70,7 @@ defmodule LatencyBench do
   @moduledoc false
 
   @wav Path.join(__DIR__, "bench_utterance.wav")
-  @utterance "Oi Mira, tudo bem? Me conta uma coisa rápida sobre você."
+  @utterance "Oi Ceci, tudo bem? Me conta uma coisa rápida sobre você."
   @say_voice "Luciana"
 
   # Sent before the utterance so the trial does not start mid-handshake. Bandit answers

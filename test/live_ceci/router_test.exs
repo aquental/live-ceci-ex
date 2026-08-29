@@ -77,12 +77,12 @@ defmodule LiveCeci.RouterTest do
       assert conn.status == 200
     end
 
-    # priv/assets mixes two audiences: media the browser fetches, and mira_persona.txt,
+    # priv/assets mixes two audiences: media the browser fetches, and ceci_persona.txt,
     # which only the compiler reads (LiveCeci.Persona inlines it via @external_resource).
     # Plug.Static cannot tell them apart on its own, so the allowlist is what keeps the
     # system prompt off the wire.
     test "the persona prompt is not reachable over HTTP" do
-      conn = call(conn(:get, "/assets/mira_persona.txt"))
+      conn = call(conn(:get, "/assets/ceci_persona.txt"))
 
       assert conn.status == 404
       refute conn.resp_body =~ "midnight"

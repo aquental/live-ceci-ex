@@ -127,7 +127,7 @@ defmodule LiveCeci.Provider.Gemini do
   defp parts(_sc), do: []
 
   defp transcript_role(:input), do: :user
-  defp transcript_role(:output), do: :mira
+  defp transcript_role(:output), do: :ceci
 
   # Leaving the key out entirely is not the same as sending nil: gemini_ex would
   # serialise "languageCode": null, and the API rejects that.

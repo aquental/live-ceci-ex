@@ -155,7 +155,7 @@ defmodule LiveCeci.Provider.Grok do
 
   defp translate(%{"type" => "response.output_audio_transcript.done", "transcript" => t}, owner)
        when is_binary(t) and t != "" do
-    send(owner, {:provider, {:transcript, :mira, t}})
+    send(owner, {:provider, {:transcript, :ceci, t}})
     []
   end
 

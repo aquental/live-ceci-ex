@@ -1,6 +1,6 @@
 # live-ceci-ex — a voice agent you can interrupt, in Elixir
 
-Talk to **Mira**, a late-night radio DJ. Ask her to play something. Talk over her mid-sentence and she stops, listens, and picks the thread back up.
+Talk to **Ceci**, a late-night radio DJ. Ask her to play something. Talk over her mid-sentence and she stops, listens, and picks the thread back up.
 
 An Elixir port of [`live-dj`](../live-dj) — the demo from **EP1 of the Multimodal Agents Cookbook**. **No Phoenix and no agent framework**, so the whole primitive stays visible.
 
@@ -19,7 +19,7 @@ mix run --no-halt
 
 Open <http://localhost:8000>, **put headphones on** (otherwise she hears her own radio), tap 🎙 and talk.
 
-Try: *"hey Mira"* · *"can you play something dream pop"* · *"skip this"* — then **talk over her** while she's speaking.
+Try: *"hey Ceci"* · *"can you play something dream pop"* · *"skip this"* — then **talk over her** while she's speaking.
 
 ### Configuration
 
@@ -31,10 +31,10 @@ Try: *"hey Mira"* · *"can you play something dream pop"* · *"skip this"* — t
 | `LANGUAGE` | — | locale for the voice, POSIX or BCP-47 spelling (`pt_BR` and `pt-BR` both work). Omitted entirely when unset; both APIs reject a null here. |
 | `GOOGLE_API_KEY` / `GEMINI_API_KEY` | — | either name works; `gemini_ex` wants the second, the Python repo's `.env` has the first. Missing it warns at boot (except in `:test`). |
 | `GOOGLE_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | the Gemini Live model |
-| `GOOGLE_LIVE_VOICE` | `Aoede` | Mira's **native Live** voice |
+| `GOOGLE_LIVE_VOICE` | `Aoede` | Ceci's **native Live** voice |
 | `GROK_API_KEY` | — | required when `MODEL=GROK` |
 | `GROK_LIVE_MODEL` | `grok-voice-latest` | the xAI voice model |
-| `GROK_LIVE_VOICE` | `eve` | Mira's xAI voice |
+| `GROK_LIVE_VOICE` | `eve` | Ceci's xAI voice |
 | `PORT` | `8000` | the HTTP port |
 | `SILENCE_DURATION_MS` | `400` | how long a provider's VAD waits in silence before deciding your turn is over. A hard floor under every answer — nothing comes back until it elapses. `0..10000` |
 | `FRAME_SAMPLES` | `1600` | mic batch size in 16 kHz samples; `1600` = 100 ms. Reaches the browser's AudioWorklet through `GET /config.json`. `160..16000` |
@@ -63,14 +63,14 @@ Where the Python version runs **two asyncio tasks** (mic up, audio down), the BE
 
 ## The module that matters, and the seam under it
 
-[`LiveCeci.Socket`](lib/live_ceci/socket.ex) is the whole app: one browser socket in, one model session out, and everything that makes Mira *Mira* layered on top of that single bridge.
+[`LiveCeci.Socket`](lib/live_ceci/socket.ex) is the whole app: one browser socket in, one model session out, and everything that makes Ceci *Ceci* layered on top of that single bridge.
 
 The primitive underneath is four steps — open a session, send the mic up, receive voice back, push it to the browser. `Socket` adds the persona, the tools, transcription, and `Process.flag(:trap_exit, true)`, so a session crash becomes an `{:EXIT, …}` message it can report instead of a silent death.
 
 What it does *not* do any more is know which API answered. [`LiveCeci.Provider`](lib/live_ceci/provider.ex) is a behaviour over six neutral events:
 
 ```
-{:voice, pcm}   :interrupted   {:transcript, :user | :mira, text}
+{:voice, pcm}   :interrupted   {:transcript, :user | :ceci, text}
 {:play, cmd}    {:error, _}    {:closed, _}
 ```
 
@@ -108,7 +108,7 @@ Phoenix earns its place at the *next* step — multi-user, auth, Presence, deplo
 | `priv/spike/grok_voice_spike.exs` | the throwaway script that verified the xAI protocol against the live API before any of it was written — including whether manual turn detection beats server VAD |
 | `priv/spike/latency_bench.exs` | TTFA, both backends, interleaved — see [Measuring latency](#measuring-latency) |
 | `lib/live_ceci/tools.ex` | `play_playlist` / `play_track` / `skip` / `pause` — they return **instantly**, so the voice never stalls |
-| `lib/live_ceci/persona.ex` · `priv/assets/mira_persona.txt` | who Mira is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
+| `lib/live_ceci/persona.ex` · `priv/assets/ceci_persona.txt` | who Ceci is — read at **compile time**, with `@external_resource` so editing the text triggers a recompile |
 | `lib/live_ceci/router.ex` | the WebSocket upgrade + static files + `/healthz` |
 | `config/runtime.exs` | the `.env` reader and the API-key aliasing |
 | `priv/frontend/` | the browser client, **copied unchanged** from the Python repo |
@@ -221,7 +221,7 @@ threw outliers at 1130, 1216 and 1740 ms (sd 236) where Gemini stayed between 77
 
 - **Browser → server:** binary frames, 16 kHz mono PCM s16le. Text frames are accepted and ignored; the contract reserves them for `{"type":"start"|"stop"}`, which the client doesn't send today.
 - **Server → browser:** binary frames of 24 kHz PCM (voice), plus JSON text frames:
-  `{"type":"transcript","role":"user"|"mira","text":…}` ·
+  `{"type":"transcript","role":"user"|"ceci","text":…}` ·
   `{"type":"play","action":"playlist"|"track"|"skip"|"pause","value":…}` ·
   `{"type":"interrupted"}` · `{"type":"error","message":…}`
 
@@ -235,16 +235,18 @@ mix format --check-formatted
 mix deps.audit          # advisory database; mix hex.audit only reads retirement flags
 ```
 
-**77 tests, no network:**
+**123 tests, no network:**
 
 | | |
 |---|---|
-| `provider/grok_test.exs` (18) | xAI events in, neutral events out — binary voice and the base64 fallback, barge-in, transcripts, tool dispatch, and that the tool reply goes out by `cast`, because `WebSockex.send_frame/3` **raises** when the caller is the socket process |
+| `provider/grok_test.exs` (33) | xAI events in, neutral events out — binary voice and the base64 fallback, barge-in, transcripts, tool dispatch, the session shape including the configurable silence budget, and that the tool reply goes out by `cast`, because `WebSockex.send_frame/3` **raises** when the caller is the socket process |
+| `provider/gemini_test.exs` (25) | real `gemini_ex` structs in, neutral events out — the assertions that lived in `socket_test.exs` before the seam existed, plus the session options the API actually reads |
 | `socket_test.exs` (14) | the bridge at the message-translation level, mentioning neither vendor: neutral events in, real WebSocket frames out, plus a stub provider proving the upstream call goes through whichever one is configured |
-| `provider/gemini_test.exs` (13) | real `gemini_ex` structs in, neutral events out — the assertions that lived in `socket_test.exs` before the seam existed |
 | `tools_test.exs` (12) | dispatch, the four declarations, atom- and string-keyed args, the JSON round-trip, and the instant-return guardrail — measured twice, because wall clock catches blocking and reductions catch work, and neither catches both |
-| `router_test.exs` (7) | `/healthz`, the 404 catch-all, the static client, the track catalogue and audio files — and that `priv/assets/mira_persona.txt` is **not** reachable over HTTP |
-| `live_ceci_test.exs` (6) | `config/0` reads at call time so a boot-time override wins, the test VM asks the OS for a port, and `pt_BR` normalises to `pt-BR` |
+| `live_ceci_test.exs` (12) | `config/0` reads at call time so a boot-time override wins, the test VM asks the OS for a port, `pt_BR` normalises to `pt-BR`, and `env_int/3` falls back **loudly** on every plausible `.env` typo |
+| `router_test.exs` (9) | `/healthz`, `/config.json`, the 404 catch-all, the static client, the track catalogue and audio files — and that `priv/assets/ceci_persona.txt` is **not** reachable over HTTP |
+| `socket_lifecycle_test.exs` (6) | the socket opened and closed for real over TCP, so `terminate/2` actually runs — the path that leaked billed provider sessions when it did not |
+| `agent_name_test.exs` (5) | the agent is Ceci, in the instruction, in the `:ceci` atom, in the `"ceci"` role on the wire, and nowhere in `lib/` or `priv/frontend` under the old name |
 | `persona_test.exs` (4) | the instruction loads, carries both halves, names every callable tool, and is shaped as the `Content` the setup message expects |
 | `live_session_test.exs` (3) | a stalled or dead session comes back as `{:error, {:exit, _}}` and the caller stays alive — the guardrail on the one call that sits in the audio path |
 
@@ -255,5 +257,5 @@ Real `gemini_ex` structs in, real WebSocket frames out. `config/test.exs` sets a
 - **Voice** is a Gemini Live *native* voice (`LIVE_VOICE`, default `Aoede`) — the Live API has its own voice set, so it can't reproduce a TTS voice you used elsewhere. The persona carries the character, not the timbre.
 - **Barge-in** is client-side: the browser cuts playback the instant the mic hears you (RMS gate at `0.02` in `priv/frontend/main.js`). The server forwards `interrupted` too.
 - **Mic framing.** The worklet batches PCM into ~100 ms frames rather than emitting one per 128-sample render quantum — at 48 kHz that was 375 WebSocket frames/sec of ~85 bytes, where framing overhead dwarfed the audio. Barge-in can't wait for the batch, so a quantum that crosses the gate posts an RMS-only message immediately and the cut stays instant.
-- **Ducking** is client-side as well: the music drops to 12 % while Mira talks and comes back 450 ms after she stops.
+- **Ducking** is client-side as well: the music drops to 12 % while Ceci talks and comes back 450 ms after she stops.
 - **Concurrency** is where the port pays off. The Python design doc lists *"what breaks at 10× concurrent: one process holding N sessions saturates."* Here each listener is an isolated, supervised process; one dropped call never touches another.

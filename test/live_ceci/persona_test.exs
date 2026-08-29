@@ -9,9 +9,9 @@ defmodule LiveCeci.PersonaTest do
     assert String.length(instruction) > 200
   end
 
-  test "carries both halves: who Mira is, and that she is now live" do
+  test "carries both halves: who Ceci is, and that she is now live" do
     instruction = Persona.instruction()
-    assert instruction =~ "You are Mira, a late-night radio DJ."
+    assert instruction =~ "You are Ceci, a late-night radio DJ."
     assert instruction =~ "You are now LIVE"
   end
 

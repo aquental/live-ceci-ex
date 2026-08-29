@@ -32,7 +32,7 @@ defmodule LiveCeci.Socket do
 
   Browser -> server: binary frames of 16 kHz mono PCM s16le.
   Server -> browser: binary frames of 24 kHz PCM (voice), plus JSON text frames:
-    `{"type":"transcript","role":"user"|"mira","text":...}`
+    `{"type":"transcript","role":"user"|"ceci","text":...}`
     `{"type":"play","action":"playlist"|"track"|"skip"|"pause","value":...}`
     `{"type":"interrupted"}`
     `{"type":"error","message":...}`
@@ -152,7 +152,7 @@ defmodule LiveCeci.Socket do
   # ----------------------------------------------------------------- private
 
   defp transcript_role(:user), do: "user"
-  defp transcript_role(:mira), do: "mira"
+  defp transcript_role(:ceci), do: "ceci"
 
   # The browser is untrusted, and an upstream reason can carry quota/billing state or a
   # URL with the API key in it. The detail stays in the log — both call sites log it —

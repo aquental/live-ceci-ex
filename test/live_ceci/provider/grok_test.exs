@@ -59,11 +59,11 @@ defmodule LiveCeci.Provider.GrokTest do
       assert_received {:provider, {:transcript, :user, "toca uma musica"}}
     end
 
-    test "output transcription is tagged :mira" do
+    test "output transcription is tagged :ceci" do
       assert {:ok, _state} =
                frame(%{type: "response.output_audio_transcript.done", transcript: "claro"})
 
-      assert_received {:provider, {:transcript, :mira, "claro"}}
+      assert_received {:provider, {:transcript, :ceci, "claro"}}
     end
 
     test "an empty transcript is dropped rather than drawn as a blank line" do

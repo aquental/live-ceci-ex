@@ -2,7 +2,7 @@ defmodule LiveCeci do
   @moduledoc """
   live-ceci — a voice agent you can interrupt.
 
-  Talk to Mira, a late-night radio DJ. Ask her to play something. Talk over her
+  Talk to Ceci, a late-night radio DJ. Ask her to play something. Talk over her
   mid-sentence and she stops, listens, and picks the thread back up.
 
   Built on the Gemini Live API via `gemini_ex` — no agent framework, no Phoenix,
@@ -13,17 +13,17 @@ defmodule LiveCeci do
 
     * `LiveCeci.Socket`  — the bridge: one browser socket, one Live session
     * `LiveCeci.Tools`   — the music-control function calls (they return instantly)
-    * `LiveCeci.Persona` — who Mira is
+    * `LiveCeci.Persona` — who Ceci is
     * `LiveCeci.Router`  — the WebSocket upgrade + static files
   """
 
   @doc """
-  Runtime configuration: the Live model, Mira's native voice, the HTTP port, and the
+  Runtime configuration: the Live model, Ceci's native voice, the HTTP port, and the
   two latency knobs.
 
   `:silence_duration_ms` and `:frame_samples` are the only settings here that exist to
   be *changed*: they are the two largest controllable terms in the delay between the
-  end of an utterance and the first byte of Mira's answer, and
+  end of an utterance and the first byte of Ceci's answer, and
   `priv/spike/latency_bench.exs` measures the effect of moving them.
   """
   @spec config() :: %{

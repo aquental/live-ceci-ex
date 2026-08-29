@@ -1,12 +1,12 @@
 // live-ceci — minimal test client (Phase 1).
 // The polished UI is aniradio's Next.js room (next step). This is enough to RUN the de-risk:
-// talk to Mira, hear her back, interrupt her, and ask her to play music.
+// talk to Ceci, hear her back, interrupt her, and ask her to play music.
 
 const $ = (id) => document.getElementById(id);
 const orb = $("orb"), statusEl = $("status"), nowEl = $("nowplaying"), txEl = $("transcript");
 const music = $("music");
 
-// Measured: room noise crossed the old 0.02 gate at 0.021-0.023 and cut Mira off mid
+// Measured: room noise crossed the old 0.02 gate at 0.021-0.023 and cut Ceci off mid
 // word; a deliberate interruption read 0.054. 0.04 sits between them.
 const BARGE_RMS = 0.04;
 let ws, audioCtx, workletNode, micStream;
@@ -25,18 +25,18 @@ function setOrb(state) { orb.className = "orb " + state; }       // idle | liste
 function setStatus(t) { statusEl.textContent = t; }
 // The transcript pane shows ~4 lines and scrolls. Nothing ever read the older ones,
 // but every line stayed in the DOM for the life of the session — and a long chat with
-// Mira is thousands of turns. Keep a scrollback, drop the rest.
+// Ceci is thousands of turns. Keep a scrollback, drop the rest.
 const MAX_LINES = 60;
 function addLine(role, text) {
   const p = document.createElement("div");
   p.className = "line " + role;
-  p.textContent = (role === "mira" ? "mira  " : "you  ") + text;
+  p.textContent = (role === "ceci" ? "ceci  " : "you  ") + text;
   txEl.appendChild(p);
   while (txEl.childElementCount > MAX_LINES) txEl.removeChild(txEl.firstElementChild);
   txEl.scrollTop = txEl.scrollHeight;
 }
 
-// ---------- music player (driven by Mira's tool calls) ----------
+// ---------- music player (driven by Ceci's tool calls) ----------
 async function loadTracks() {
   try { tracks = await (await fetch("/assets/tracks.json")).json(); } catch { tracks = []; }
 }
@@ -54,7 +54,7 @@ function handlePlay(cmd) {
   } else if (cmd.action === "skip") { qi = (qi + 1) % Math.max(1, queue.length); if (queue[qi]) { music.src = "/assets/" + queue[qi].file; music.play().catch(() => {}); setNow(queue[qi]); } }
   else if (cmd.action === "pause") { music.paused ? music.play().catch(() => {}) : music.pause(); }
 }
-function duck() {                                                          // music down while Mira talks
+function duck() {                                                          // music down while Ceci talks
   music.volume = 0.12;
   if (duckTimer) clearTimeout(duckTimer);
   duckTimer = setTimeout(() => { music.volume = 1; }, 450);
@@ -134,7 +134,7 @@ async function startMic() {
 
 async function go() {
   $("talk").disabled = true;
-  setStatus("waking mira up…"); setOrb("thinking");
+  setStatus("waking ceci up…"); setOrb("thinking");
   // Both guards make this re-entrant. A dropped socket leaves the mic, the AudioContext
   // and the worklet perfectly alive — only the socket needs rebuilding — and running
   // startMic twice would strand the old graph and re-prompt for the microphone.
