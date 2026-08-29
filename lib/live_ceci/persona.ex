@@ -1,4 +1,4 @@
-defmodule LiveDJ.Persona do
+defmodule LiveCeci.Persona do
   @moduledoc """
   Mira's persona, borrowed from aniradio's bedroom-pop room (copied, never modified).
 
@@ -7,7 +7,7 @@ defmodule LiveDJ.Persona do
   trigger a recompile.
   """
 
-  @persona_path Path.join(:code.priv_dir(:live_dj), "assets/mira_persona.txt")
+  @persona_path Path.join(:code.priv_dir(:live_ceci), "assets/mira_persona.txt")
   @external_resource @persona_path
 
   @persona @persona_path |> File.read!() |> String.trim()

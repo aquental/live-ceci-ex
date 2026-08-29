@@ -1,4 +1,4 @@
-defmodule LiveDJ.LiveSession do
+defmodule LiveCeci.LiveSession do
   @moduledoc """
   A failure-tolerant wrapper over the one `Gemini.Live.Session` call that sits on the
   audio hot path.

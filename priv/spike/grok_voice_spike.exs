@@ -1,11 +1,11 @@
-# Spike: can xAI's Voice Agent stand in for Gemini Live behind LiveDJ.Socket?
+# Spike: can xAI's Voice Agent stand in for Gemini Live behind LiveCeci.Socket?
 #
 #     set -a && . ./.env && set +a && mix run --no-start priv/spike/grok_voice_spike.exs
 #
 # Throwaway. It answers the questions that decide the effort, in risk order, and
 # prints a verdict per question. Nothing here is meant to survive into the app.
 #
-# Reuses LiveDJ.Persona and LiveDJ.Tools on purpose: if the existing declarations
+# Reuses LiveCeci.Persona and LiveCeci.Tools on purpose: if the existing declarations
 # do not drop straight into Grok's session.update, that is the finding.
 
 defmodule GrokSpike.WS do
@@ -44,7 +44,7 @@ defmodule GrokSpike do
     key = System.get_env("GROK_API_KEY")
     model = env("GROK_LIVE_MODEL", "grok-voice-latest")
     voice = env("GROK_LIVE_VOICE", "eve")
-    language = LiveDJ.normalize_language(System.get_env("LANGUAGE"))
+    language = LiveCeci.normalize_language(System.get_env("LANGUAGE"))
 
     if key in [nil, ""] do
       IO.puts("GROK_API_KEY is empty — nothing to talk to. Set it in .env and re-run.")
@@ -78,7 +78,7 @@ defmodule GrokSpike do
 
     # The whole point: does what the app already has drop straight in?
     tools =
-      Enum.map(LiveDJ.Tools.declarations(), fn d ->
+      Enum.map(LiveCeci.Tools.declarations(), fn d ->
         %{
           type: "function",
           name: d.name,
@@ -347,7 +347,7 @@ defmodule GrokSpike do
 
   defp persona_text do
     # Gemini takes a Content struct; flatten whatever Persona builds into text.
-    case LiveDJ.Persona.system_instruction() do
+    case LiveCeci.Persona.system_instruction() do
       %{parts: parts} when is_list(parts) ->
         Enum.map_join(parts, " ", &Map.get(&1, :text, ""))
 

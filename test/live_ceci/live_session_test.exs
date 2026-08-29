@@ -1,7 +1,7 @@
-defmodule LiveDJ.LiveSessionTest do
+defmodule LiveCeci.LiveSessionTest do
   use ExUnit.Case, async: true
 
-  alias LiveDJ.LiveSession
+  alias LiveCeci.LiveSession
 
   # A stand-in for Gemini.Live.Session: answers the same call message, or never answers.
   defmodule StubSession do

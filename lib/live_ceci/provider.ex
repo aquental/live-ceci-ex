@@ -1,6 +1,6 @@
-defmodule LiveDJ.Provider do
+defmodule LiveCeci.Provider do
   @moduledoc """
-  The seam between `LiveDJ.Socket` and whichever live-voice API is behind it.
+  The seam between `LiveCeci.Socket` and whichever live-voice API is behind it.
 
   Two APIs sit behind this today — Gemini Live and xAI's Voice Agent — and they
   disagree about almost everything at the wire level: Gemini pushes typed structs
@@ -27,7 +27,7 @@ defmodule LiveDJ.Provider do
   and expects the result as its RETURN value, synchronously; xAI expects two separate
   messages sent back over the socket. A shared `send_tool_result/3` would fit one and
   be dead weight in the other, and routing tool calls through the socket process would
-  make the Gemini path impossible. So each provider calls `LiveDJ.Tools.dispatch/2`
+  make the Gemini path impossible. So each provider calls `LiveCeci.Tools.dispatch/2`
   itself and emits `{:play, command}` — the decision stays shared, only the handshake
   differs.
 
@@ -65,5 +65,5 @@ defmodule LiveDJ.Provider do
   per request.
   """
   @spec current() :: module()
-  def current, do: Application.get_env(:live_dj, :provider, LiveDJ.Provider.Gemini)
+  def current, do: Application.get_env(:live_ceci, :provider, LiveCeci.Provider.Gemini)
 end

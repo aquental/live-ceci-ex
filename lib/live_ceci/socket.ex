@@ -1,6 +1,6 @@
-defmodule LiveDJ.Socket do
+defmodule LiveCeci.Socket do
   @moduledoc """
-  live-dj — the live-voice bridge (EP1, ported to Elixir).
+  live-ceci — the live-voice bridge (EP1, ported to Elixir).
 
   One browser WebSocket = one process = one provider session. Where the Python
   version runs two asyncio tasks (mic up, audio down), the BEAM needs neither: the
@@ -19,9 +19,9 @@ defmodule LiveDJ.Socket do
 
   ## Which backend
 
-  `LiveDJ.Provider.current/0` picks Gemini Live or xAI's Voice Agent from `MODEL`.
+  `LiveCeci.Provider.current/0` picks Gemini Live or xAI's Voice Agent from `MODEL`.
   This module never learns which: providers translate their wire format into the
-  neutral events documented in `LiveDJ.Provider`, so everything below is the same
+  neutral events documented in `LiveCeci.Provider`, so everything below is the same
   either way — including the frames the browser receives.
 
   Its sibling gotcha does survive: mic audio goes to `send_realtime_input/2`, NOT
@@ -42,7 +42,7 @@ defmodule LiveDJ.Socket do
 
   require Logger
 
-  alias LiveDJ.Provider
+  alias LiveCeci.Provider
 
   @impl WebSock
   def init(_opts) do
@@ -50,7 +50,7 @@ defmodule LiveDJ.Socket do
     # instead of silently taking this process down with it.
     Process.flag(:trap_exit, true)
 
-    config = LiveDJ.config()
+    config = LiveCeci.config()
     provider = Provider.current()
 
     Logger.info(

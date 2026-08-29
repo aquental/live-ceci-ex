@@ -1,11 +1,11 @@
-defmodule LiveDJ.RouterTest do
+defmodule LiveCeci.RouterTest do
   use ExUnit.Case, async: true
   import Plug.Test
   import Plug.Conn
 
-  @opts LiveDJ.Router.init([])
+  @opts LiveCeci.Router.init([])
 
-  defp call(conn), do: LiveDJ.Router.call(conn, @opts)
+  defp call(conn), do: LiveCeci.Router.call(conn, @opts)
 
   # The RFC6455 handshake headers WebSockAdapter validates before upgrading. "host" has to
   # go in directly: Plug.Conn.put_req_header/3 refuses it, but the validation reads the header.
@@ -41,7 +41,7 @@ defmodule LiveDJ.RouterTest do
       conn = call(conn(:get, "/"))
 
       assert conn.status == 200
-      assert conn.resp_body =~ "live-dj"
+      assert conn.resp_body =~ "live-ceci"
     end
 
     test "the browser can fetch the track catalogue it drives the player from" do
@@ -58,7 +58,7 @@ defmodule LiveDJ.RouterTest do
     end
 
     # priv/assets mixes two audiences: media the browser fetches, and mira_persona.txt,
-    # which only the compiler reads (LiveDJ.Persona inlines it via @external_resource).
+    # which only the compiler reads (LiveCeci.Persona inlines it via @external_resource).
     # Plug.Static cannot tell them apart on its own, so the allowlist is what keeps the
     # system prompt off the wire.
     test "the persona prompt is not reachable over HTTP" do
@@ -73,7 +73,7 @@ defmodule LiveDJ.RouterTest do
     test "upgrades to the socket handler with the framing limits" do
       call(ws_conn())
 
-      assert_receive {_ref, :upgrade, {:websocket, {LiveDJ.Socket, [], opts}}}
+      assert_receive {_ref, :upgrade, {:websocket, {LiveCeci.Socket, [], opts}}}
       assert opts[:timeout] == 60_000
       assert opts[:max_frame_size] == 1_000_000
     end

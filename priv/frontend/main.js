@@ -1,4 +1,4 @@
-// live-dj — minimal test client (Phase 1).
+// live-ceci — minimal test client (Phase 1).
 // The polished UI is aniradio's Next.js room (next step). This is enough to RUN the de-risk:
 // talk to Mira, hear her back, interrupt her, and ask her to play music.
 

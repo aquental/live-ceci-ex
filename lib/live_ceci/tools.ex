@@ -1,4 +1,4 @@
-defmodule LiveDJ.Tools do
+defmodule LiveCeci.Tools do
   @moduledoc """
   Music-control tools for Mira.
 

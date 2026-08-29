@@ -1,6 +1,6 @@
-defmodule LiveDJ.Provider.Grok do
+defmodule LiveCeci.Provider.Grok do
   @moduledoc """
-  `LiveDJ.Provider` over xAI's Voice Agent API.
+  `LiveCeci.Provider` over xAI's Voice Agent API.
 
   The protocol is OpenAI Realtime's, so this is a JSON event stream over a plain
   WebSocket rather than a typed client library — there is no Elixir package for it,
@@ -21,7 +21,7 @@ defmodule LiveDJ.Provider.Grok do
   selected.
   """
 
-  @behaviour LiveDJ.Provider
+  @behaviour LiveCeci.Provider
   use WebSockex
 
   require Logger
@@ -34,7 +34,7 @@ defmodule LiveDJ.Provider.Grok do
 
   # ------------------------------------------------------------------ provider
 
-  @impl LiveDJ.Provider
+  @impl LiveCeci.Provider
   def open(opts) do
     owner = Keyword.fetch!(opts, :owner)
     model = Keyword.fetch!(opts, :model)
@@ -63,7 +63,7 @@ defmodule LiveDJ.Provider.Grok do
     end
   end
 
-  @impl LiveDJ.Provider
+  @impl LiveCeci.Provider
   def send_audio(ws, pcm) do
     # Straight out as a binary frame — no envelope, no base64. The session negotiated
     # `transport: "binary"`, so this is what the server expects on the input buffer.
@@ -72,7 +72,7 @@ defmodule LiveDJ.Provider.Grok do
     :exit, reason -> {:error, {:exit, reason}}
   end
 
-  @impl LiveDJ.Provider
+  @impl LiveCeci.Provider
   def close(ws) do
     if is_pid(ws) and Process.alive?(ws), do: Process.exit(ws, :normal)
     :ok
@@ -168,7 +168,7 @@ defmodule LiveDJ.Provider.Grok do
          },
          owner
        ) do
-    {command, result} = LiveDJ.Tools.dispatch(name, decode_args(args))
+    {command, result} = LiveCeci.Tools.dispatch(name, decode_args(args))
     if command, do: send(owner, {:provider, {:play, command}})
     tool_result_payloads(id, result)
   end
@@ -200,7 +200,7 @@ defmodule LiveDJ.Provider.Grok do
       session: %{
         voice: voice,
         # Gemini takes a Content struct here; Grok takes a bare string.
-        instructions: LiveDJ.Persona.instruction(),
+        instructions: LiveCeci.Persona.instruction(),
         turn_detection: %{
           type: "server_vad",
           silence_duration_ms: 500,
@@ -219,9 +219,9 @@ defmodule LiveDJ.Provider.Grok do
     }
   end
 
-  # LiveDJ.Tools already emits JSON Schema; Grok only wants a `type` alongside it.
+  # LiveCeci.Tools already emits JSON Schema; Grok only wants a `type` alongside it.
   defp tools do
-    Enum.map(LiveDJ.Tools.declarations(), fn d ->
+    Enum.map(LiveCeci.Tools.declarations(), fn d ->
       %{type: "function", name: d.name, description: d.description, parameters: d.parameters}
     end)
   end
@@ -244,7 +244,7 @@ defmodule LiveDJ.Provider.Grok do
 
   # WebSockex.send_frame/3 is a :gen.call, so an unresponsive socket would exit the
   # CALLER — the socket process carrying the microphone. Same hazard, same guard as
-  # LiveDJ.LiveSession on the Gemini side.
+  # LiveCeci.LiveSession on the Gemini side.
   defp send_json(ws, payload) do
     WebSockex.send_frame(ws, {:text, Jason.encode!(payload)}, @send_timeout)
   catch

@@ -1,6 +1,6 @@
 import Config
 
-config :live_dj,
+config :live_ceci,
   model: "gemini-3.1-flash-live-preview",
   voice: "Aoede",
   port: 8000

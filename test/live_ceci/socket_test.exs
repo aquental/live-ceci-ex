@@ -1,4 +1,4 @@
-defmodule LiveDJ.SocketTest do
+defmodule LiveCeci.SocketTest do
   @moduledoc """
   The bridge, tested at the message-translation level: provider events in, real
   WebSocket frames out. No browser automation, no live session — the seam is
@@ -6,16 +6,16 @@ defmodule LiveDJ.SocketTest do
   actually lives.
 
   Nothing here mentions Gemini or Grok. That is the point: the socket sees only the
-  neutral events in `LiveDJ.Provider`, and each provider's own translation is tested
-  against its own wire format in `test/live_dj/provider/`.
+  neutral events in `LiveCeci.Provider`, and each provider's own translation is tested
+  against its own wire format in `test/live_ceci/provider/`.
   """
   use ExUnit.Case, async: true
 
-  alias LiveDJ.Socket
+  alias LiveCeci.Socket
 
   @pcm <<1, 0, 2, 0, 3, 0, 255, 127>>
 
-  defp state, do: %{session: nil, provider: LiveDJ.Provider.Gemini}
+  defp state, do: %{session: nil, provider: LiveCeci.Provider.Gemini}
 
   describe "voice downstream" do
     test "voice is pushed as a binary frame, unchanged" do
@@ -103,7 +103,7 @@ defmodule LiveDJ.SocketTest do
       assert {:stop, :normal, _state} =
                Socket.handle_info({:EXIT, pid, :killed}, %{
                  session: pid,
-                 provider: LiveDJ.Provider.Gemini
+                 provider: LiveCeci.Provider.Gemini
                })
     end
 
@@ -119,7 +119,7 @@ defmodule LiveDJ.SocketTest do
 
     test "audio goes through the configured provider, whichever it is" do
       defmodule RecordingProvider do
-        @behaviour LiveDJ.Provider
+        @behaviour LiveCeci.Provider
         def open(_opts), do: {:ok, self()}
         def send_audio(_session, pcm), do: send(self(), {:sent, pcm}) && :ok
         def close(_session), do: :ok
@@ -132,7 +132,7 @@ defmodule LiveDJ.SocketTest do
 
     test "a provider that fails to send does not take the socket down" do
       defmodule FailingProvider do
-        @behaviour LiveDJ.Provider
+        @behaviour LiveCeci.Provider
         def open(_opts), do: {:ok, self()}
         def send_audio(_session, _pcm), do: {:error, {:exit, {:timeout, :whatever}}}
         def close(_session), do: :ok

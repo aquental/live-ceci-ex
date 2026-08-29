@@ -1,4 +1,4 @@
-defmodule LiveDJ.Provider.GrokTest do
+defmodule LiveCeci.Provider.GrokTest do
   @moduledoc """
   The Grok half of the seam: real xAI Voice Agent events in, neutral provider events
   out. The event shapes here are the ones the spike in `priv/spike/` saw on the wire,
@@ -11,7 +11,7 @@ defmodule LiveDJ.Provider.GrokTest do
   """
   use ExUnit.Case, async: true
 
-  alias LiveDJ.Provider.Grok
+  alias LiveCeci.Provider.Grok
 
   @pcm <<1, 0, 2, 0, 3, 0, 255, 127>>
 

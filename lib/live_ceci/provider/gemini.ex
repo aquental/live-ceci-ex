@@ -1,24 +1,24 @@
-defmodule LiveDJ.Provider.Gemini do
+defmodule LiveCeci.Provider.Gemini do
   @moduledoc """
-  `LiveDJ.Provider` over the Gemini Live API, through `gemini_ex`.
+  `LiveCeci.Provider` over the Gemini Live API, through `gemini_ex`.
 
-  All the struct matching that used to live in `LiveDJ.Socket` is here, because it is
+  All the struct matching that used to live in `LiveCeci.Socket` is here, because it is
   the part that is true of Gemini and nothing else: voice arrives base64-encoded
   inside `serverContent.modelTurn.parts`, interruption arrives as a boolean on the
   same struct, and transcripts arrive through a separate callback tagged `:input` or
   `:output`.
 
-  The tool callback is the reason `LiveDJ.Provider` has no `send_tool_result/3`:
+  The tool callback is the reason `LiveCeci.Provider` has no `send_tool_result/3`:
   `gemini_ex` wants the responses as this function's RETURN value, synchronously,
   while the model's voice stays paused. See `handle_tool_call/2`.
   """
 
-  @behaviour LiveDJ.Provider
+  @behaviour LiveCeci.Provider
 
   alias Gemini.Live.{Audio, Session}
   alias Gemini.Types.Live.{ServerContent, ServerMessage, ToolCall}
 
-  @impl LiveDJ.Provider
+  @impl LiveCeci.Provider
   def open(opts) do
     owner = Keyword.fetch!(opts, :owner)
     model = Keyword.fetch!(opts, :model)
@@ -27,8 +27,8 @@ defmodule LiveDJ.Provider.Gemini do
 
     session_opts = [
       model: model,
-      system_instruction: LiveDJ.Persona.system_instruction(),
-      tools: LiveDJ.Tools.live_tools(),
+      system_instruction: LiveCeci.Persona.system_instruction(),
+      tools: LiveCeci.Tools.live_tools(),
       generation_config: %{
         response_modalities: ["AUDIO"],
         speech_config:
@@ -61,10 +61,10 @@ defmodule LiveDJ.Provider.Gemini do
     end
   end
 
-  @impl LiveDJ.Provider
-  def send_audio(session, pcm), do: LiveDJ.LiveSession.send_audio(session, pcm)
+  @impl LiveCeci.Provider
+  def send_audio(session, pcm), do: LiveCeci.LiveSession.send_audio(session, pcm)
 
-  @impl LiveDJ.Provider
+  @impl LiveCeci.Provider
   def close(session) do
     if is_pid(session) and Process.alive?(session), do: Session.close(session)
     :ok
@@ -81,7 +81,7 @@ defmodule LiveDJ.Provider.Gemini do
   def handle_tool_call(%ToolCall{function_calls: calls}, owner) when is_list(calls) do
     responses =
       Enum.map(calls, fn %{id: id, name: name} = call ->
-        {command, result} = LiveDJ.Tools.dispatch(name, call.args || %{})
+        {command, result} = LiveCeci.Tools.dispatch(name, call.args || %{})
         if command, do: send(owner, {:provider, {:play, command}})
         %{id: id, name: name, response: result}
       end)

@@ -37,7 +37,7 @@ end
 # Hardcoding 8000 here made config/test.exs unable to move the port at all.
 port =
   case System.get_env("PORT") do
-    nil -> Application.get_env(:live_dj, :port)
+    nil -> Application.get_env(:live_ceci, :port)
     value -> String.to_integer(value)
   end
 
@@ -46,19 +46,19 @@ port =
 {provider, model, voice} =
   case System.get_env("MODEL") |> to_string() |> String.upcase() do
     "GROK" ->
-      {LiveDJ.Provider.Grok, System.get_env("GROK_LIVE_MODEL") || "grok-voice-latest",
+      {LiveCeci.Provider.Grok, System.get_env("GROK_LIVE_MODEL") || "grok-voice-latest",
        System.get_env("GROK_LIVE_VOICE") || "eve"}
 
     _ ->
-      {LiveDJ.Provider.Gemini,
-       System.get_env("GOOGLE_LIVE_MODEL") || Application.get_env(:live_dj, :model),
-       System.get_env("GOOGLE_LIVE_VOICE") || Application.get_env(:live_dj, :voice)}
+      {LiveCeci.Provider.Gemini,
+       System.get_env("GOOGLE_LIVE_MODEL") || Application.get_env(:live_ceci, :model),
+       System.get_env("GOOGLE_LIVE_VOICE") || Application.get_env(:live_ceci, :voice)}
   end
 
-config :live_dj,
+config :live_ceci,
   provider: provider,
   model: model,
   voice: voice,
   # POSIX spelling in .env, BCP-47 on the wire. Both providers want the latter.
-  language: LiveDJ.normalize_language(System.get_env("LANGUAGE")),
+  language: LiveCeci.normalize_language(System.get_env("LANGUAGE")),
   port: port

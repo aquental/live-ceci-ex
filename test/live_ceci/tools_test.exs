@@ -1,7 +1,7 @@
-defmodule LiveDJ.ToolsTest do
+defmodule LiveCeci.ToolsTest do
   use ExUnit.Case, async: true
 
-  alias LiveDJ.Tools
+  alias LiveCeci.Tools
 
   describe "dispatch/2" do
     test "play_playlist returns a playlist command and an instant ok" do

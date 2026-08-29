@@ -3,7 +3,7 @@
 
 # Elixir/Phoenix Plugin — Mandatory Procedures
 
-> **Stack note for this project:** `live_dj` is a plain Elixir OTP app — no Phoenix, no Ecto, no Oban, no Ash. The LiveView and Ecto Iron Laws below are kept as conservative defaults; they simply never trigger here. The rules that DO apply every day are the Security, OTP, and Code Style laws, plus verification.
+> **Stack note for this project:** `live_ceci` is a plain Elixir OTP app — no Phoenix, no Ecto, no Oban, no Ash. The LiveView and Ecto Iron Laws below are kept as conservative defaults; they simply never trigger here. The rules that DO apply every day are the Security, OTP, and Code Style laws, plus verification.
 
 ## SKILL EXECUTION ENFORCEMENT
 

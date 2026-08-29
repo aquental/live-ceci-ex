@@ -1,7 +1,7 @@
-defmodule LiveDJ.PersonaTest do
+defmodule LiveCeci.PersonaTest do
   use ExUnit.Case, async: true
 
-  alias LiveDJ.Persona
+  alias LiveCeci.Persona
 
   test "loads a non-empty instruction" do
     instruction = Persona.instruction()
@@ -17,7 +17,7 @@ defmodule LiveDJ.PersonaTest do
 
   test "names every tool the model is allowed to call" do
     instruction = Persona.instruction()
-    for %{name: name} <- LiveDJ.Tools.declarations(), do: assert(instruction =~ name)
+    for %{name: name} <- LiveCeci.Tools.declarations(), do: assert(instruction =~ name)
   end
 
   test "system_instruction/0 is shaped as the Content the setup message expects" do

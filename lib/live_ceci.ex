@@ -1,6 +1,6 @@
-defmodule LiveDJ do
+defmodule LiveCeci do
   @moduledoc """
-  live-dj — a voice agent you can interrupt.
+  live-ceci — a voice agent you can interrupt.
 
   Talk to Mira, a late-night radio DJ. Ask her to play something. Talk over her
   mid-sentence and she stops, listens, and picks the thread back up.
@@ -11,10 +11,10 @@ defmodule LiveDJ do
 
   The pieces:
 
-    * `LiveDJ.Socket`  — the bridge: one browser socket, one Live session
-    * `LiveDJ.Tools`   — the music-control function calls (they return instantly)
-    * `LiveDJ.Persona` — who Mira is
-    * `LiveDJ.Router`  — the WebSocket upgrade + static files
+    * `LiveCeci.Socket`  — the bridge: one browser socket, one Live session
+    * `LiveCeci.Tools`   — the music-control function calls (they return instantly)
+    * `LiveCeci.Persona` — who Mira is
+    * `LiveCeci.Router`  — the WebSocket upgrade + static files
   """
 
   @doc """
@@ -28,10 +28,10 @@ defmodule LiveDJ do
         }
   def config do
     %{
-      model: Application.get_env(:live_dj, :model),
-      voice: Application.get_env(:live_dj, :voice),
-      language: Application.get_env(:live_dj, :language),
-      port: Application.get_env(:live_dj, :port)
+      model: Application.get_env(:live_ceci, :model),
+      voice: Application.get_env(:live_ceci, :voice),
+      language: Application.get_env(:live_ceci, :language),
+      port: Application.get_env(:live_ceci, :port)
     }
   end
 

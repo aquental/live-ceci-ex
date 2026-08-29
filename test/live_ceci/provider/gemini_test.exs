@@ -1,4 +1,4 @@
-defmodule LiveDJ.Provider.GeminiTest do
+defmodule LiveCeci.Provider.GeminiTest do
   @moduledoc """
   The Gemini half of the seam: real `gemini_ex` structs in, neutral provider events
   out. These assertions used to live in `socket_test.exs`, back when the socket knew
@@ -7,7 +7,7 @@ defmodule LiveDJ.Provider.GeminiTest do
   use ExUnit.Case, async: true
 
   alias Gemini.Types.Live.{ServerContent, ServerMessage, ToolCall}
-  alias LiveDJ.Provider.Gemini, as: Subject
+  alias LiveCeci.Provider.Gemini, as: Subject
 
   # 24 kHz PCM arrives base64-encoded inside the model turn's parts.
   @pcm <<1, 0, 2, 0, 3, 0, 255, 127>>
