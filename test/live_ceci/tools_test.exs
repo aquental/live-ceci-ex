@@ -225,40 +225,87 @@ defmodule LiveCeci.ToolsTest do
       end
     end
 
-    # Reductions are immune to machine load, so this half never flakes.
+    # A ceiling PER TOOL, not one for all seven. The single 320 was calibrated against the
+    # most expensive tool and was therefore useless for the other six: measured here,
+    # listar_pacientes costs 50 reductions and a File.read! of priv/data/clinic.json costs
+    # 39, so a file read added to it landed at 89 against a ceiling of 320. The guard the
+    # docstring above describes was not guarding five of the seven tools it named.
     #
-    # Measured after wiring Data (warm): stubs 66-75, listar_pacientes 78, fechar_mes 145,
-    # resumo_mensal and listar_sessoes_hoje 283. 320 is tight against that 283. The
-    # reference offender — File.read! of a small file — still costs about 40 extra, so
-    # 283+40 misses this ceiling the way 66+40 missed 90. Jason.decode is thousands
-    # extra. Do not round up to 400 — that would let a file read on this path through.
-    @budget_reductions 320
+    # These are measured plus 25, which is under the 39 a file read costs, so the margin
+    # is smaller than the cheapest thing this is meant to catch. Reductions are
+    # deterministic — three runs gave identical counts — so tight is safe. If an OTP bump
+    # moves them, this fails with the number to write down, which is the right failure.
+    #
+    # It already earned that: unifying the two month-resolution paths took resumo_mensal
+    # from 225 to 295 and this test said so, which a shared 320 would have swallowed.
+    @reduction_ceilings %{
+      "agendar_sessao" => 91,
+      "confirmar_presenca" => 91,
+      "emitir_recibo" => 93,
+      "listar_pacientes" => 76,
+      "fechar_mes" => 205,
+      "listar_sessoes_hoje" => 273,
+      "resumo_mensal" => 320
+    }
 
-    test "the cost does not grow with the size of what the model sends" do
-      # The property that matters, and a flat budget cannot express it. The model chooses
-      # these strings; if the work is proportional to their length, a long one stalls her
-      # voice, because a live function call pauses it until the tool returns.
-      #
-      # This caught a real one. coerce/2 used String.slice/3 to truncate, which walks the
-      # WHOLE binary instead of stopping at the limit — 25_316 reductions for a 200_000
-      # character argument against 301 for binary_part. Bounding by a byte prefix first
-      # made it flat.
-      cost = fn chars ->
-        args = %{"paciente" => "M.S.", "quando" => String.duplicate("á", chars)}
-        {:reductions, before} = Process.info(self(), :reductions)
-        Tools.dispatch("agendar_sessao", args)
-        {:reductions, now} = Process.info(self(), :reductions)
-        now - before
+    # What the reduction ceiling is a PROXY for, asserted directly. Reductions conflate
+    # work with data volume, so they can only ever approximate "does this touch the
+    # world"; a call trace answers it.
+    #
+    # The tracer has to be a separate process — a process does not receive its own :call
+    # trace messages, which is why the first version of this caught nothing and passed.
+    @forbidden [File, :file, Jason, :gen_server, :httpc, :gen_tcp, :inet]
+
+    defp calls_made(fun) do
+      test = self()
+
+      tracer =
+        spawn(fn ->
+          loop = fn loop, acc ->
+            receive do
+              {:trace, _pid, :call, {m, f, a}} -> loop.(loop, [{m, f, length(a)} | acc])
+              {:dump, to} -> send(to, {:calls, Enum.uniq(acc)})
+            end
+          end
+
+          loop.(loop, [])
+        end)
+
+      for m <- @forbidden, do: :erlang.trace_pattern({m, :_, :_}, true, [:local])
+      :erlang.trace(test, true, [:call, {:tracer, tracer}])
+      fun.()
+      :erlang.trace(test, false, [:call])
+      for m <- @forbidden, do: :erlang.trace_pattern({m, :_, :_}, false, [:local])
+
+      send(tracer, {:dump, test})
+
+      receive do
+        {:calls, calls} -> calls
+      after
+        1_000 -> flunk("the tracer did not answer")
       end
+    end
 
-      small = cost.(200)
-      huge = cost.(2_000_000)
+    test "the tracer would notice — the guard is checked against a known offender" do
+      # A test for the test. Without this, a trace that silently caught nothing would make
+      # the assertion below pass for every tool forever, which is exactly what the first
+      # version of it did.
+      caught = calls_made(fn -> File.read!("mix.exs") end)
 
-      # Ten thousand times the input, and the work must not even double. Measured flat:
-      # 1219 -> 1643.
-      assert huge < small * 2,
-             "dispatch cost #{small} reductions on 200 characters and #{huge} on 2_000_000 — " <>
-               "the truncation is walking the input instead of bounding it"
+      assert {File, :read!, 1} in caught,
+             "the call tracer is not catching File.read!/1 — the next test proves nothing"
+    end
+
+    test "no tool touches the world" do
+      for {name, args} <- @cases do
+        Data.reset(@clinic)
+        caught = calls_made(fn -> Tools.dispatch(name, args) end)
+
+        assert caught == [],
+               "#{name} called #{inspect(caught)} — dispatch runs inside the provider's " <>
+                 "session process with the model's voice paused, so it must not touch " <>
+                 "the filesystem, the network, or another process"
+      end
     end
 
     test "no tool does real work" do
@@ -277,8 +324,11 @@ defmodule LiveCeci.ToolsTest do
           end)
           |> Enum.min()
 
-        assert burned < @budget_reductions,
-               "#{name} burned #{burned} reductions — dispatch must stay a pattern match over plain data"
+        ceiling = Map.fetch!(@reduction_ceilings, name)
+
+        assert burned < ceiling,
+               "#{name} burned #{burned} reductions against a ceiling of #{ceiling} — " <>
+                 "dispatch must stay a pattern match over plain data"
       end
     end
   end
@@ -362,6 +412,57 @@ defmodule LiveCeci.ToolsTest do
       # The descriptions carry accented Portuguese now, which is exactly the sort of
       # thing that survives Elixir and dies at an encoder boundary.
       assert Tools.declarations() |> Jason.encode!() |> Jason.decode!() |> length() == 7
+    end
+  end
+
+  describe "fechar_mes under concurrency" do
+    test "two sessions closing two different months do not clobber each other" do
+      # Reproduced before the fix, with get_data + put_data: A closed agosto, B closed
+      # setembro from a snapshot it had read a moment earlier, and B's write reverted
+      # agosto to open — while both people were told "mês fechado, dados encaminhados ao
+      # contador". One of those was not true, and nothing said so.
+      #
+      # Interleaved by hand rather than with Tasks, because the race is a property of the
+      # read-decide-write sequence and not of the scheduler. Timing it would make this a
+      # test that usually passes.
+      two_months =
+        Map.put(@clinic, "months", %{
+          "agosto" => %{"status" => "open", "year" => 2026},
+          "setembro" => %{"status" => "open", "year" => 2026}
+        })
+
+      Data.reset(two_months)
+
+      stale = Data.get_data()
+      assert {%{action: "fechamento"}, _} = Tools.dispatch("fechar_mes", %{"mes" => "agosto"})
+
+      # B decides against `stale`, which no longer exists. The compare-and-swap refuses
+      # it, dispatch re-reads, and setembro closes on top of the agosto that is already
+      # closed rather than instead of it.
+      assert {:stale, _} = {Data.replace(stale, stale), :b_would_have_won_before}
+      assert {%{action: "fechamento"}, _} = Tools.dispatch("fechar_mes", %{"mes" => "setembro"})
+
+      months = Data.get_data()["months"]
+      assert months["agosto"]["status"] == "closed", "agosto was reverted by the second close"
+      assert months["setembro"]["status"] == "closed"
+    end
+
+    test "closing the same month twice is refused, not double-reported" do
+      Data.reset(@clinic)
+
+      assert {%{action: "fechamento"}, _} = Tools.dispatch("fechar_mes", %{"mes" => "agosto"})
+
+      assert {nil, %{result: "esse mês já está fechado"}} =
+               Tools.dispatch("fechar_mes", %{"mes" => "agosto"})
+    end
+
+    test "a relative month is closable, because the schema says it is" do
+      Data.reset(@clinic)
+
+      assert {%{action: "fechamento", detail: "este mês"}, _} =
+               Tools.dispatch("fechar_mes", %{"mes" => "este mês"})
+
+      assert Data.get_data()["months"]["agosto"]["status"] == "closed"
     end
   end
 end

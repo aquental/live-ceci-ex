@@ -42,7 +42,9 @@ function addLine(role, text) {
 // ---------- activity panel (driven by Ceci's tool calls) ----------
 // Every tool she calls lands here as one line. It is the only proof from the browser
 // side that the round trip happened: her voice says she booked it, this says the call
-// actually came back. Nothing is persisted — these are stubs on the server too.
+// actually came back. Booking, attendance and receipts are still stubs; the listing tools
+// read a snapshot the server holds in memory, and `fechar_mes` WRITES to it — so "fechou
+// o mês" is the one line here that means something changed.
 const ACTIONS = {
   agendar:     "agendou",
   presenca:    "registrou presença",

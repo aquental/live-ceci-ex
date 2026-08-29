@@ -152,6 +152,11 @@ defmodule LiveCeci.Tools do
   @typedoc "An action the server forwards to the browser's activity panel, or `nil`."
   @type action :: %{required(:action) => String.t(), optional(:detail) => String.t()} | nil
 
+  # Three, because each attempt is a read, a decision and a 2.2 us compare-and-swap, and
+  # a fourth losing to the same racer is not a thing that happens on a path one person
+  # reaches by speaking a sentence.
+  @close_attempts 3
+
   @doc """
   Returns `{action, function_result}`.
 
@@ -202,7 +207,7 @@ defmodule LiveCeci.Tools do
     mes = arg(args, :mes)
 
     complete([mes: mes], fn ->
-      case LiveCeci.Clinic.preview_month(LiveCeci.Data.get_data(), mes) do
+      case LiveCeci.Clinic.preview_month(LiveCeci.Data.get_data(), mes, LiveCeci.Clock.today()) do
         %{status: "closed"} = preview ->
           {%{action: "resumo", detail: mes},
            %{result: "esse mês já está fechado — #{speak_preview(preview)}"}}
@@ -247,23 +252,7 @@ defmodule LiveCeci.Tools do
   def dispatch("fechar_mes", args) do
     mes = arg(args, :mes)
 
-    complete([mes: mes], fn ->
-      data = LiveCeci.Data.get_data()
-
-      case LiveCeci.Clinic.close_month(data, mes) do
-        {:ok, new_data} ->
-          LiveCeci.Data.put_data(new_data)
-
-          {%{action: "fechamento", detail: mes},
-           %{result: "mês fechado, dados encaminhados ao contador"}}
-
-        {:error, :already_closed} ->
-          {nil, %{result: "esse mês já está fechado"}}
-
-        {:error, :unknown_month} ->
-          {nil, %{result: "mês desconhecido — pergunte de novo"}}
-      end
-    end)
+    complete([mes: mes], fn -> close_month(mes, @close_attempts) end)
   end
 
   def dispatch(name, _args), do: {nil, %{result: "unknown tool: #{name}"}}
@@ -366,6 +355,41 @@ defmodule LiveCeci.Tools do
     parts
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join(" · ")
+  end
+
+  # Read, decide, then swap only if nothing moved underneath. The first version was
+  # get_data + put_data, which is last-writer-wins: reproduced with two sessions closing
+  # two DIFFERENT months, where the second write reverted the first and both people were
+  # told "mês fechado, dados encaminhados ao contador".
+  #
+  # The retry re-READS before deciding again, which is the point — it is not retrying the
+  # write, it is redoing the decision against what is there now. That also closes the
+  # same-month version of the race for free: the second attempt sees the close the first
+  # racer landed and answers "esse mês já está fechado", which is true.
+  defp close_month(_mes, 0) do
+    {nil, %{result: "não consegui fechar agora — peça de novo"}}
+  end
+
+  defp close_month(mes, attempts) do
+    data = LiveCeci.Data.get_data()
+
+    case LiveCeci.Clinic.close_month(data, mes, LiveCeci.Clock.today()) do
+      {:ok, closed} ->
+        case LiveCeci.Data.replace(data, closed) do
+          :ok ->
+            {%{action: "fechamento", detail: mes},
+             %{result: "mês fechado, dados encaminhados ao contador"}}
+
+          :stale ->
+            close_month(mes, attempts - 1)
+        end
+
+      {:error, :already_closed} ->
+        {nil, %{result: "esse mês já está fechado"}}
+
+      {:error, :unknown_month} ->
+        {nil, %{result: "mês desconhecido — pergunte de novo"}}
+    end
   end
 
   defp speak_preview(%{mes: mes, sessoes: sessoes, faltas: faltas, recebimentos: recebimentos}) do

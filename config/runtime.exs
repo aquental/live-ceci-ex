@@ -78,9 +78,14 @@ model = System.get_env(defaults.model_env) || defaults.model
 voice = System.get_env(defaults.voice_env) || defaults.voice
 
 # Loopback unless told otherwise. Bandit's own default is 0.0.0.0, which on a laptop on
-# café wifi puts an unauthenticated WebSocket in front of a metered API on the open LAN:
-# /ws has no origin check and no auth, and every frame it accepts spends the API key's
-# quota. BIND_IP=0.0.0.0 is the deliberate opt-in for when you want a phone to reach it.
+# café wifi puts this in front of the open LAN. The sentence here used to say the stake
+# was the API key's quota, and it is now out of date in both directions: /ws has an
+# Origin check and a single-use ticket, and what is behind them is no longer only a
+# metered API. `listar_pacientes` and `listar_sessoes_hoje` read a clinic snapshot, so
+# what an open bind exposes is a therapy practice's patient roster and today's schedule.
+#
+# BIND_IP=0.0.0.0 is still the deliberate opt-in for letting a phone reach it. It is a
+# larger decision than it was.
 bind_ip =
   case System.get_env("BIND_IP") || "127.0.0.1" do
     address ->
