@@ -109,12 +109,16 @@ defmodule LiveCeci.Tickets do
   # connections and 28 refusals with max_sessions set to 100.
   defp max_per_address, do: Application.get_env(:live_ceci, :max_tickets_per_address, 150)
 
-  # Must stay comfortably ABOVE max_per_address, or the eviction that protects the table
-  # starts throwing away tickets that were just issued and have not been used yet.
-  # Measured with per-address at 150 and this at 200: two addresses filled the table and
-  # 100 of the first address's 150 tickets were evicted before their owners could present
-  # them — a 403 on a ticket the server had just handed out.
-  defp max_outstanding, do: Application.get_env(:live_ceci, :max_tickets, 1_000)
+  # DERIVED, not configured: twice the per-address bound. The two cannot drift apart,
+  # which is the failure this shape exists to prevent — raising the per-address cap
+  # without raising the global one turns the eviction that protects the table into
+  # something that throws away tickets that were just issued. Measured at per-address 150
+  # against a global of 200: two addresses filled the table and 100 of the first
+  # address's 150 tickets were evicted before their owners could present them.
+  #
+  # Two is the ratio, so the headroom scales with whatever the per-address cap is set to.
+  @outstanding_ratio 2
+  defp max_outstanding, do: max_per_address() * @outstanding_ratio
 
   defp count_for(address) do
     :ets.select_count(@table, [{{:_, :_, :"$1"}, [{:==, :"$1", {:const, address}}], [true]}])

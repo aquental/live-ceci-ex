@@ -131,11 +131,9 @@ config :live_ceci,
   # How many upgrade tickets one address may hold at once. On loopback that is one
   # person; behind a NAT or a reverse proxy it is everyone, and then this — not
   # MAX_SESSIONS — is what caps concurrent users.
+  # The global bound on outstanding tickets is DERIVED from this, at twice the value, so
+  # the two cannot be raised out of step. See LiveCeci.Tickets.
   max_tickets_per_address: LiveCeci.env_int("MAX_TICKETS_PER_ADDRESS", 150, 1..100_000),
-  # The global bound. Keep it comfortably above MAX_TICKETS_PER_ADDRESS: when the table
-  # is full the oldest ticket is evicted, and if the two are close that eviction starts
-  # discarding tickets that were just issued and not yet presented.
-  max_tickets: LiveCeci.env_int("MAX_TICKETS", 1_000, 1..1_000_000),
   max_sessions_per_address: LiveCeci.env_int("MAX_SESSIONS_PER_ADDRESS", 4, 1..1_000),
   allowed_origins:
     System.get_env("ALLOWED_ORIGINS")

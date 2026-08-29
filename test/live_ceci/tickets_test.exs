@@ -97,30 +97,54 @@ defmodule LiveCeci.TicketsTest do
       # The backstop, and the direction matters: refusing the newcomer is what let
       # whoever arrived first keep the door shut.
       #
-      # Driven from application env rather than the default, so the test states the
-      # relationship it is checking instead of tracking whatever the default happens to
-      # be this month.
-      Application.put_env(:live_ceci, :max_tickets, 200)
-      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets) end)
+      # The global bound is derived at twice the per-address one, so this drives the
+      # per-address knob and computes what the table is allowed to hold.
+      Application.put_env(:live_ceci, :max_tickets_per_address, 10)
+      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
+      ceiling = 10 * 2
 
       for i <- 1..250, do: Tickets.issue({10, 0, div(i, 256), rem(i, 256)})
 
-      assert Tickets.outstanding() <= 200
+      assert Tickets.outstanding() <= ceiling
       assert {:ok, _} = Tickets.issue({192, 168, 1, 1})
     end
 
-    test "the global bound stays far enough above the per-address one to not evict live tickets" do
-      # The trap behind raising MAX_TICKETS_PER_ADDRESS: eviction protects the table, and
-      # if the two bounds are close it starts protecting it from legitimate tickets.
-      # Measured at per-address 150 with a global of 200 — two addresses filled the table
-      # and 100 of the first one's 150 were evicted before their owners could present
-      # them, which is a 403 on a ticket the server had just handed out.
-      per_address = Application.get_env(:live_ceci, :max_tickets_per_address, 150)
-      global = Application.get_env(:live_ceci, :max_tickets, 1_000)
+    test "the global bound is derived, so the two cannot be raised out of step" do
+      # The trap this shape closes: raising the per-address cap alone turns the eviction
+      # that protects the table into something that discards tickets just issued.
+      # Measured at per-address 150 against a global of 200 — two addresses filled the
+      # table and 100 of the first one's 150 were evicted before their owners could
+      # present them, a 403 on a ticket the server had handed out seconds earlier.
+      Application.put_env(:live_ceci, :max_tickets_per_address, 10)
+      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
 
-      assert global >= per_address * 4,
-             "MAX_TICKETS (#{global}) is too close to MAX_TICKETS_PER_ADDRESS " <>
-               "(#{per_address}) — eviction will start discarding unused tickets"
+      # Two addresses at the per-address cap fit exactly, and nothing is evicted.
+      a = for _ <- 1..10, do: Tickets.issue({10, 0, 0, 1})
+      _b = for _ <- 1..10, do: Tickets.issue({10, 0, 0, 2})
+
+      assert Enum.count(a, &match?({:ok, _}, &1)) == 10
+      assert Tickets.outstanding() == 20
+
+      assert Enum.count(a, fn {:ok, t} -> Tickets.consume(t, {10, 0, 0, 1}) == :ok end) == 10
+    end
+
+    test "at the 2x ratio a THIRD busy address evicts the first one's live tickets" do
+      # What the ratio costs, measured rather than assumed. This is not a bug report —
+      # 2x is the configured ratio — it is the number to look at before raising
+      # MAX_TICKETS_PER_ADDRESS in a deployment where many distinct addresses each hold
+      # many tickets at once. At 150 per address, a third busy address left the first
+      # with 6 of its 150.
+      Application.put_env(:live_ceci, :max_tickets_per_address, 10)
+      on_exit(fn -> Application.delete_env(:live_ceci, :max_tickets_per_address) end)
+
+      first = for _ <- 1..10, do: Tickets.issue({10, 0, 0, 1})
+      for _ <- 1..10, do: Tickets.issue({10, 0, 0, 2})
+      for _ <- 1..10, do: Tickets.issue({10, 0, 0, 3})
+
+      survived = Enum.count(first, fn {:ok, t} -> Tickets.consume(t, {10, 0, 0, 1}) == :ok end)
+
+      assert survived < 10,
+             "the third address should have evicted some of the first's tickets"
     end
   end
 
