@@ -59,12 +59,6 @@ defmodule LiveCeci.Tickets do
   @table __MODULE__
   @ttl_ms 30_000
   @max_outstanding 200
-  # A browser needs one ticket per connection, and a ticket that is minted but never
-  # presented still occupies a slot for its full TTL — a failed connect, a closed tab
-  # between the fetch and the upgrade. Twenty in thirty seconds is already well past a
-  # reconnect loop with any backoff at all, and it still takes ten cooperating addresses
-  # to reach the global bound, where eviction takes over.
-  @max_per_address 20
   @sweep_every_ms 60_000
 
   # 32 bytes. Long enough that guessing is not a strategy, short enough for a URL.
@@ -82,12 +76,12 @@ defmodule LiveCeci.Tickets do
     maybe_sweep()
 
     cond do
-      count_for(address) >= @max_per_address ->
+      count_for(address) >= max_per_address() ->
         # The bound that actually stops the flood, because it is scoped to whoever is
         # flooding. Refusing here denies one address, not everyone.
         Logger.warning(
           "refusing a ws ticket for #{:inet.ntoa(address)}: " <>
-            "#{@max_per_address} already outstanding from there"
+            "#{max_per_address()} already outstanding from there"
         )
 
         {:error, :too_many}
@@ -103,6 +97,18 @@ defmodule LiveCeci.Tickets do
         {:ok, ticket}
     end
   end
+
+  # A browser needs one ticket per connection, and a ticket that is minted but never
+  # presented still occupies a slot for its full TTL — a failed connect, a closed tab
+  # between the fetch and the upgrade. Twenty in thirty seconds is well past a reconnect
+  # loop with any backoff at all.
+  #
+  # Configurable because "one address" is a deployment question, not a code one. On
+  # loopback it is one person. Behind a NAT or a reverse proxy it is EVERYONE, and this
+  # becomes the ceiling on concurrent users regardless of MAX_SESSIONS — demonstrated by
+  # priv/spike/load_test.exs, where 50 simultaneous clients from 127.0.0.1 got 22
+  # connections and 28 refusals with max_sessions set to 100.
+  defp max_per_address, do: Application.get_env(:live_ceci, :max_tickets_per_address, 20)
 
   defp count_for(address) do
     :ets.select_count(@table, [{{:_, :_, :"$1"}, [{:==, :"$1", {:const, address}}], [true]}])

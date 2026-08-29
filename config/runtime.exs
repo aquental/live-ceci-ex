@@ -128,6 +128,10 @@ config :live_ceci,
   # concurrency and rate limits, which are not documented and were not tested — raising
   # MAX_SESSIONS is a question for xAI or Google, not for this file.
   max_sessions: LiveCeci.env_int("MAX_SESSIONS", 8, 1..1_000),
+  # How many upgrade tickets one address may hold at once. On loopback that is one
+  # person; behind a NAT or a reverse proxy it is everyone, and then this — not
+  # MAX_SESSIONS — is what caps concurrent users.
+  max_tickets_per_address: LiveCeci.env_int("MAX_TICKETS_PER_ADDRESS", 20, 1..10_000),
   max_sessions_per_address: LiveCeci.env_int("MAX_SESSIONS_PER_ADDRESS", 4, 1..1_000),
   allowed_origins:
     System.get_env("ALLOWED_ORIGINS")
